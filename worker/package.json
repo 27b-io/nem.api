@@ -1,0 +1,20 @@
+{
+  "name": "nem-api-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker for the NEM dispatch SCADA API (nem.api modernization)",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit",
+    "seed:generate": "node scripts/generate-seed.mjs",
+    "migrate:local": "wrangler d1 migrations apply nem-api-db --local",
+    "migrate:remote": "wrangler d1 migrations apply nem-api-db --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260721.1",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.113.0"
+  }
+}
