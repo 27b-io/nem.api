@@ -12,7 +12,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/raywalker-it/nem.api.git"
+    "url": "https://github.com/27b-io/nem.api.git"
   },
   "devDependencies": {
     "adm-zip": "^0.4.7",
