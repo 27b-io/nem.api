@@ -15,3 +15,9 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "ARCHIVE"
 bucket_name = "nem-api-archive"
+
+# SCADA CURRENT ingest (LAB-417). NEMWEB publishes a file per 5-minute
+# dispatch interval; discovery diffs the listing against the `scrape` ledger,
+# so missed runs catch up automatically.
+[triggers]
+crons = ["*/5 * * * *"]

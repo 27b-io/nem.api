@@ -2,8 +2,9 @@
 
 Cloudflare Worker for the modernized NEM dispatch SCADA API. Stage 1 (LAB-416):
 project scaffold, D1 schema, R2 archive bucket, and the generator reference data
-seeded from the repo registration CSV. SCADA ingest, query endpoints, and the
-frontend land in later stages.
+seeded from the repo registration CSV. Stage 2 (LAB-417): the 5-minute Cron
+ingest of CURRENT Dispatch SCADA. Query endpoints and the frontend land in
+later stages.
 
 Dev deployment: https://nem-api.raywalker.workers.dev (workers.dev is the dev
 environment). Production domain will be **nem.27b.io** — attached at DNS
@@ -26,8 +27,56 @@ npm run migrate:local   # apply migrations (schema + generator seed) to local D1
 npm run dev             # http://127.0.0.1:8787/health -> {"status":"ok","generators":350}
 ```
 
-`npm run check` typechecks. `/health` queries D1, so a 500 there means the
+`npm run check` typechecks (src and tests). `npm test` runs the vitest suite in
+the real Workers runtime (`@cloudflare/vitest-pool-workers`) against a real D1
+with all migrations applied. `/health` queries D1, so a 500 there means the
 binding or migrations are broken — that is deliberate.
+
+## SCADA ingest (Cron, every 5 minutes)
+
+`src/ingest.ts`, triggered by the `*/5 * * * *` cron in `wrangler.toml`. Each
+run:
+
+1. **Discovers** files on the NEMWEB autoindex
+   (`https://nemweb.com.au/Reports/CURRENT/Dispatch_SCADA/`, HTTPS — the legacy
+   scraper's plain `http.get` broke on the 307 redirect) with `HTMLRewriter`,
+   no jsdom.
+2. **Diffs** the listing against the `scrape` ledger and processes only
+   not-yet-recorded files, oldest first.
+3. Per file: fetch zip → unzip in-Worker (`fflate`; Workers have no native ZIP
+   support) → parse `D,DISPATCH,UNIT_SCADA` rows (per-row SETTLEMENTDATE, NEM
+   market time = fixed UTC+10) → **upsert** into `scada_values` → archive the
+   raw zip to R2 (`current/<filename>`) → record the filename in `scrape`.
+
+To exercise it locally:
+
+```sh
+npx wrangler dev --test-scheduled
+curl "http://127.0.0.1:8787/__scheduled?cron=*/5+*+*+*+*"
+```
+
+### Idempotency & gap handling
+
+Re-runs and overlapping intervals never double-insert: values upsert on the
+`(scrape_time, generator_id)` primary key, the R2 key is deterministic (put
+skipped when the object exists), and the ledger insert is `OR IGNORE`. The
+ledger write happens **last**, so a file that fails part-way stays unrecorded
+and is retried on the next run — every earlier step is idempotent, making
+whole-file retry always safe.
+
+If cron intervals are missed (deploy freeze, outage), the next run catches up
+automatically: discovery diffs the whole CURRENT listing (~2 days of files)
+against the ledger. Catch-up is bounded to 50 files per run
+(`MAX_FILES_PER_RUN`) — a cold start over the full listing drains in about an
+hour of 5-minute runs. Gaps longer than CURRENT's ~2-day window need the
+ARCHIVE backfill (LAB-420).
+
+Failure handling: one bad file logs and the run continues (per-file
+isolation). NEMWEB's WAF rate-limits aggressive clients with 403s, so after 5
+*consecutive* failures the run aborts early rather than extending the block —
+the next run resumes where it stopped. DUIDs missing from `generators` (the
+2015 seed predates most solar/wind/battery units) are logged per run and their
+values dropped; the Stage 4 registration refresh (LAB-421) is the fix.
 
 ## Migrations
 
