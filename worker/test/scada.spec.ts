@@ -53,4 +53,12 @@ describe('parseSettlementDate', () => {
     expect(parseSettlementDate('2026-07-23 23:35:00')).toBeNull();
     expect(parseSettlementDate('')).toBeNull();
   });
+
+  it('rejects calendar-invalid dates instead of letting Date.UTC roll them over', () => {
+    expect(parseSettlementDate('2026/02/30 12:00:00')).toBeNull(); // would roll to Mar 2
+    expect(parseSettlementDate('2026/13/01 12:00:00')).toBeNull(); // month 13
+    expect(parseSettlementDate('2026/07/23 25:00:00')).toBeNull(); // hour 25
+    expect(parseSettlementDate('2026/07/23 23:61:00')).toBeNull(); // minute 61
+    expect(parseSettlementDate('2024/02/29 12:00:00')).toBe(Date.UTC(2024, 1, 29, 2, 0, 0) / 1000); // real leap day still parses
+  });
 });

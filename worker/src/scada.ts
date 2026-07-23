@@ -34,7 +34,22 @@ export function parseSettlementDate(text: string): number | null {
   const m = SETTLEMENT_DATE.exec(text);
   if (!m) return null;
   const [, y, mo, d, h, mi, s] = m;
-  return Date.UTC(+y, +mo - 1, +d, +h, +mi, +s) / 1000 - NEM_UTC_OFFSET_SECONDS;
+  const ms = Date.UTC(+y, +mo - 1, +d, +h, +mi, +s);
+  // Date.UTC silently normalizes calendar-invalid input (2026/02/30 → March 2,
+  // 25:00 → next day 01:00), which would ingest a corrupted row under the
+  // wrong scrape_time. Round-trip the components so those return null instead.
+  const rt = new Date(ms);
+  if (
+    rt.getUTCFullYear() !== +y ||
+    rt.getUTCMonth() !== +mo - 1 ||
+    rt.getUTCDate() !== +d ||
+    rt.getUTCHours() !== +h ||
+    rt.getUTCMinutes() !== +mi ||
+    rt.getUTCSeconds() !== +s
+  ) {
+    return null;
+  }
+  return ms / 1000 - NEM_UTC_OFFSET_SECONDS;
 }
 
 function unquote(field: string): string {
