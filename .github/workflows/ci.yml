@@ -1,0 +1,71 @@
+# Validate the Worker on every pull request and default-branch push.
+name: CI
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run check
+      - name: Verify generated seed
+        run: |
+          npm run seed:generate
+          git diff --exit-code -- migrations/0002_seed_generators.sql
+      - name: Apply local D1 migrations
+        run: npm run migrate:local
+      - name: Smoke-check local /health
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="$(mktemp)"
+          npx wrangler dev --local --ip 127.0.0.1 --port 8787 >"$log_file" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" 2>/dev/null || true
+            wait "$server_pid" 2>/dev/null || true
+            rm -f "$log_file"
+          }
+          trap cleanup EXIT
+
+          for attempt in {1..30}; do
+            if response="$(curl --silent --show-error --fail http://127.0.0.1:8787/health 2>/dev/null)"; then
+              if [ "$response" = '{"status":"ok","generators":350}' ]; then
+                exit 0
+              fi
+              echo "Unexpected /health response: $response" >&2
+              cat "$log_file" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "Local Worker did not become ready" >&2
+          cat "$log_file" >&2
+          exit 1
