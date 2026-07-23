@@ -1,0 +1,17 @@
+# nem.api modernization — single Worker (ingest + API + assets land here in later stages).
+# workers.dev deploy is the dev environment; production routes/domains attach at cutover (LAB-422).
+name = "nem-api"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+# Pinned so CI deploys need only CLOUDFLARE_API_TOKEN (no account lookup).
+account_id = "a3ff5761a3414bbf10e94ef31ea6aa07"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nem-api-db"
+database_id = "f00b82f4-086b-44da-abfe-c44f44872a8d"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "ARCHIVE"
+bucket_name = "nem-api-archive"
