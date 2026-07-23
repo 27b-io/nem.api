@@ -11,6 +11,21 @@ import assert from 'node:assert/strict';
 const CSV_PATH = new URL('../../api/db/files/nem_registration_latest.csv', import.meta.url);
 const OUT_PATH = new URL('../migrations/0002_seed_generators.sql', import.meta.url);
 
+// Every column the seed consumes, resolved from the header by name so a
+// reordered/renamed AEMO export fails loudly instead of shifting fields silently.
+const COLUMNS = {
+  participant: 'Participant',
+  name: 'Station Name',
+  state: 'Region',
+  fuel_type: 'Fuel Source - Primary',
+  fuel_description: 'Fuel Source - Descriptor',
+  technology_type: 'Technology Type - Primary',
+  technology_description: 'Technology Type - Descriptor',
+  duid: 'DUID',
+  reg_cap: 'Reg Cap (MW)',
+  max_cap: 'Max Cap (MW)',
+};
+
 // RFC 4180-ish: quoted fields, "" escapes a quote, \r\n or \n row endings.
 function parseCsv(text) {
   const rows = [];
@@ -36,23 +51,39 @@ function parseCsv(text) {
   return rows;
 }
 
-function collapseGenerators(rows) {
+function resolveColumns(header) {
+  const seen = new Map(); // trimmed header name -> index, or -1 if duplicated
+  header.forEach((raw, i) => {
+    const name = raw.trim();
+    seen.set(name, seen.has(name) ? -1 : i);
+  });
+  const col = {};
+  for (const [key, name] of Object.entries(COLUMNS)) {
+    const i = seen.get(name);
+    assert.notEqual(i, undefined, `CSV header missing required column: "${name}"`);
+    assert.notEqual(i, -1, `CSV header has duplicate required column: "${name}"`);
+    col[key] = i;
+  }
+  return col;
+}
+
+function collapseGenerators(rows, col) {
   const byKey = new Map(); // "name\0duid" -> generator
   for (const r of rows) {
-    const name = r[1].trim(), state = r[2].trim(), duid = r[13].trim();
-    const reg = Number(r[14].trim()), max = Number(r[15].trim()); // '-' -> NaN
+    const name = r[col.name].trim(), duid = r[col.duid].trim();
+    const reg = Number(r[col.reg_cap].trim()), max = Number(r[col.max_cap].trim()); // '-' -> NaN
     const key = `${name}\0${duid}`;
     const existing = byKey.get(key);
     if (!existing) {
       byKey.set(key, {
         name,
-        participant_name: r[0].trim(),
+        participant_name: r[col.participant].trim(),
         duid,
-        state,
-        technology_type: r[8].trim(),
-        technology_description: r[9].trim(),
-        fuel_type: r[6].trim(),
-        fuel_description: r[7].trim(),
+        state: r[col.state].trim(),
+        technology_type: r[col.technology_type].trim(),
+        technology_description: r[col.technology_description].trim(),
+        fuel_type: r[col.fuel_type].trim(),
+        fuel_description: r[col.fuel_description].trim(),
         reg_cap: Number.isNaN(reg) ? 0 : reg,
         max_cap: Number.isNaN(max) ? 0 : max,
       });
@@ -74,12 +105,28 @@ function selfCheck() {
     [['a', 'b, "x"', 'c'], ['d', 'e', 'f']],
     'CSV parser broke on quotes/CRLF',
   );
+
+  const legacyHeader = ['Participant', 'Station Name', 'Region', 'Dispatch Type', 'Category',
+    'Classification', 'Fuel Source - Primary', 'Fuel Source - Descriptor', 'Technology Type - Primary',
+    'Technology Type - Descriptor', 'Physical Unit No.', 'Unit Size (MW)', 'Aggregation', 'DUID',
+    'Reg Cap (MW)', 'Max Cap (MW)', 'Max ROC/Min'];
+  const col = resolveColumns(legacyHeader);
+  assert.deepEqual(
+    [col.participant, col.name, col.state, col.duid, col.reg_cap, col.max_cap],
+    [0, 1, 2, 13, 14, 15],
+    'column resolution broke on the known AEMO layout',
+  );
+  assert.throws(() => resolveColumns(legacyHeader.filter((h) => h !== 'DUID')),
+    /missing required column: "DUID"/, 'missing column must be fatal');
+  assert.throws(() => resolveColumns([...legacyHeader, 'DUID']),
+    /duplicate required column: "DUID"/, 'duplicate column must be fatal');
+
   const rows = [
     ['P1', 'Station A', 'VIC1', '', '', '', 'Hydro', 'Water', 'Renewable', 'Gravity', '', '', '', 'DUID1', '10.5', '20', ''],
     ['P2', 'Station A', 'NSW1', '', '', '', 'Coal', 'Black', 'Fossil', 'Steam', '', '', '', 'DUID1', '-', '5', ''],
   ];
-  const [g] = collapseGenerators(rows);
-  assert.equal(collapseGenerators(rows).length, 1, 'dedup by (name,duid) broke');
+  const [g] = collapseGenerators(rows, col);
+  assert.equal(collapseGenerators(rows, col).length, 1, 'dedup by (name,duid) broke');
   assert.equal(g.reg_cap, 10.5, "'-' capacity must not corrupt the sum");
   assert.equal(g.max_cap, 25, 'capacity summing broke');
   assert.equal(g.participant_name, 'P1', 'first row must win for metadata');
@@ -89,9 +136,8 @@ function selfCheck() {
 selfCheck();
 
 const csvRows = parseCsv(readFileSync(CSV_PATH, 'utf-8'));
-const header = csvRows.shift();
-assert.equal(header[13].trim(), 'DUID', `unexpected CSV layout: column 13 is ${header[13]}`);
-const generators = collapseGenerators(csvRows);
+const col = resolveColumns(csvRows.shift());
+const generators = collapseGenerators(csvRows, col);
 assert.ok(generators.length > 0, 'no generators parsed');
 
 const values = generators.map((g) =>

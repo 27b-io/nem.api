@@ -25,8 +25,12 @@ CREATE INDEX generators_idx_fuel ON generators (fuel_type, fuel_description);
 
 -- scrape_time = unix seconds (UTC) of the dispatch interval.
 -- PK (scrape_time, generator_id) preserved from legacy so ingest upserts stay idempotent.
--- generator_id references generators.id but is intentionally NOT an FK: the registration
--- refresh (LAB-421) replaces generators wholesale and must not be blocked by value rows.
+-- generator_id references generators.id but is intentionally NOT an FK, so the registration
+-- refresh (LAB-421) is not blocked by value rows. Once scada_values holds data, any refresh
+-- MUST preserve generators.id: upsert on the (duid, name) identity (generators_duid_name —
+-- DUID alone is not unique, e.g. Murray 1/Murray 2 both use MURRAY) and retire generators
+-- missing from the new registration rather than deleting them. Never DELETE + reinsert:
+-- fresh rowids would silently orphan historical value rows.
 -- No separate index on scrape_time — it is the leftmost PK column, so time-range scans
 -- already use the primary key of this clustered (WITHOUT ROWID) table.
 CREATE TABLE scada_values (

@@ -12,10 +12,9 @@ export default {
         const row = await env.DB.prepare('SELECT count(*) AS n FROM generators').first<{ n: number }>();
         return Response.json({ status: 'ok', generators: row?.n ?? 0 });
       } catch (err) {
-        return Response.json(
-          { status: 'error', message: err instanceof Error ? err.message : String(err) },
-          { status: 500 },
-        );
+        // Raw D1 errors stay in the logs (wrangler tail / dashboard), not the public response.
+        console.error('health check failed:', err);
+        return Response.json({ status: 'error' }, { status: 500 });
       }
     }
 

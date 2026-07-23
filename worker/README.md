@@ -62,9 +62,15 @@ npm run migrate:local    # or migrate:remote
 
 If `0002` was already applied, wrangler will not re-run it — bump the new seed
 into a fresh migration file instead (`cp` the regenerated file to
-`migrations/000N_reseed_generators.sql`; it starts with `DELETE FROM generators`
-so it fully replaces the table). The live `.xls` registration refresh is a
-separate later stage (LAB-421).
+`migrations/000N_reseed_generators.sql`).
+
+**DELETE + reinsert is only safe while `scada_values` is empty.** The generated
+seed starts with `DELETE FROM generators`, which reassigns ids — fine today,
+but once ingest has written value rows keyed by `generator_id`, a refresh must
+preserve ids: upsert on the `(duid, name)` identity (`generators_duid_name` —
+DUID alone is not unique) and retire generators missing from the new
+registration instead of deleting them. That id-stable refresh is LAB-421's
+scope, along with the live `.xls` registration source.
 
 ## Deploy
 
