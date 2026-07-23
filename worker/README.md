@@ -6,7 +6,10 @@ seeded from the repo registration CSV. SCADA ingest, query endpoints, and the
 frontend land in later stages.
 
 Dev deployment: https://nem-api.raywalker.workers.dev (workers.dev is the dev
-environment; production routes attach at DNS cutover).
+environment). Production domain will be **nem.27b.io** — attached at DNS
+cutover (LAB-422) via a `routes = [{ pattern = "nem.27b.io", custom_domain = true }]`
+entry in `wrangler.toml`; the 27b.io zone must live on the same Cloudflare
+account as the Worker.
 
 ## Bindings
 
