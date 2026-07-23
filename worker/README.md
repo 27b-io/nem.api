@@ -65,6 +65,17 @@ separate later stage (LAB-421).
 
 ## Deploy
 
+CD: every push to the default branch (`master`, or `main` if ever renamed) runs
+`.github/workflows/deploy.yml` — typecheck, apply D1 migrations, `wrangler deploy`,
+then smoke-check `/health`. It needs one repo Actions secret:
+
+- `CLOUDFLARE_API_TOKEN` — API token scoped to the account, with
+  **Workers Scripts: Edit** and **D1: Edit** (Cloudflare dash → My Profile →
+  API Tokens → "Edit Cloudflare Workers" template + add D1 Edit). The account id
+  is pinned in `wrangler.toml`, so no account permission is needed beyond that.
+
+Manual deploy still works:
+
 ```sh
 npm run deploy
 curl https://nem-api.raywalker.workers.dev/health

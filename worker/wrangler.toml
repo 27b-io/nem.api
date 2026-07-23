@@ -3,6 +3,8 @@
 name = "nem-api"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
+# Pinned so CI deploys need only CLOUDFLARE_API_TOKEN (no account lookup).
+account_id = "a3ff5761a3414bbf10e94ef31ea6aa07"
 
 [[d1_databases]]
 binding = "DB"
