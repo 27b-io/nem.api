@@ -7,14 +7,20 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc --noEmit -p test",
+    "test": "vitest run",
     "seed:generate": "node scripts/generate-seed.mjs",
     "migrate:local": "wrangler d1 migrations apply nem-api-db --local",
     "migrate:remote": "wrangler d1 migrations apply nem-api-db --remote"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.7",
     "@cloudflare/workers-types": "^5.20260721.1",
     "typescript": "^5.8.3",
+    "vitest": "^4.1.10",
     "wrangler": "^4.113.0"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3"
   }
 }

@@ -1,3 +1,5 @@
+import { runIngest } from './ingest';
+
 export interface Env {
   DB: D1Database;
   ARCHIVE: R2Bucket;
@@ -19,5 +21,14 @@ export default {
     }
 
     return new Response('Not found', { status: 404 });
+  },
+
+  // Cron ("*/5 * * * *" in wrangler.toml): ingest new CURRENT Dispatch SCADA
+  // files. Per-file errors are isolated inside runIngest; a throw here (e.g.
+  // the listing fetch itself failing) marks the cron invocation failed in the
+  // dashboard, which is exactly the visibility we want — the next run catches
+  // up regardless.
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await runIngest(env);
   },
 } satisfies ExportedHandler<Env>;
