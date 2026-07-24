@@ -3,8 +3,18 @@
 Cloudflare Worker for the modernized NEM dispatch SCADA API. Stage 1 (LAB-416):
 project scaffold, D1 schema, R2 archive bucket, and the generator reference data
 seeded from the repo registration CSV. Stage 2 (LAB-417): the 5-minute Cron
-ingest of CURRENT Dispatch SCADA. Query endpoints and the frontend land in
-later stages.
+ingest of CURRENT Dispatch SCADA. Stage 3 (LAB-418): the v2 query API. The
+frontend lands in a later stage.
+
+## Query API (v2)
+
+`src/api.ts` — `GET /api/v2/values`, `GET /api/v2/values/aggregate?group_by=fuel|tech|state`,
+and `GET /api/v2/generators`, serving from D1 with the legacy query grammar
+(time windows, generator filters, `,`→IN / `*`→LIKE operator inference)
+preserved, all user input bound (never interpolated), server-side time
+bucketing, and a columnar lib-agnostic payload. The pinned request/response
+contract lives in [`API.md`](./API.md) — it is owned jointly with the LAB-419
+frontend; change both together.
 
 Dev deployment: https://nem-api.raywalker.workers.dev (workers.dev is the dev
 environment). Production domain will be **nem.27b.io** — attached at DNS
