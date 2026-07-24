@@ -399,7 +399,13 @@ async function handleAggregate(env: Env, params: URLSearchParams, requestTimeMs:
 async function handleGenerators(env: Env, params: URLSearchParams): Promise<Response> {
   const filters = generatorFilters(params);
   const where = filters.length > 0 ? ` WHERE ${filters.map((f) => f.sql).join(' AND ')}` : '';
-  const { results } = await env.DB.prepare(`SELECT * FROM generators${where} ORDER BY id`)
+  // Explicit projection, not SELECT * — the response shape is pinned in
+  // API.md; future schema columns must not drift (or leak) into it silently.
+  const { results } = await env.DB.prepare(
+    'SELECT id, name, participant_name, duid, state, technology_type, ' +
+      'technology_description, fuel_type, fuel_description, reg_cap, max_cap ' +
+      `FROM generators${where} ORDER BY id`,
+  )
     .bind(...filters.flatMap((f) => f.binds))
     .all();
   // Bare array, as the legacy endpoint returned.
