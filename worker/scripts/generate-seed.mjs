@@ -5,14 +5,17 @@
 // summed across physical-unit rows, '-' capacities ignored. Two deliberate
 // departures from legacy: the reg_cap/max_cap swap bug on first insert is fixed,
 // and the 'unknown' sentinel generator row is not emitted.
+// Collapse/column-resolution logic lives in registration.mjs, shared with the
+// live registration refresh (refresh-generators.mjs).
 import { readFileSync, writeFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
+import { resolveColumns, collapseGenerators, sq, sqlTuple, GENERATOR_COLUMNS } from './registration.mjs';
 
 const CSV_PATH = new URL('../../api/db/files/nem_registration_latest.csv', import.meta.url);
 const OUT_PATH = new URL('../migrations/0002_seed_generators.sql', import.meta.url);
 
-// Every column the seed consumes, resolved from the header by name so a
-// reordered/renamed AEMO export fails loudly instead of shifting fields silently.
+// Every column the seed consumes — 2015 CSV header names (the live workbook's
+// differ; refresh-generators.mjs carries its own map).
 const COLUMNS = {
   participant: 'Participant',
   name: 'Station Name',
@@ -51,54 +54,6 @@ function parseCsv(text) {
   return rows;
 }
 
-function resolveColumns(header) {
-  const seen = new Map(); // trimmed header name -> index, or -1 if duplicated
-  header.forEach((raw, i) => {
-    const name = raw.trim();
-    seen.set(name, seen.has(name) ? -1 : i);
-  });
-  const col = {};
-  for (const [key, name] of Object.entries(COLUMNS)) {
-    const i = seen.get(name);
-    assert.notEqual(i, undefined, `CSV header missing required column: "${name}"`);
-    assert.notEqual(i, -1, `CSV header has duplicate required column: "${name}"`);
-    col[key] = i;
-  }
-  return col;
-}
-
-function collapseGenerators(rows, col) {
-  const byKey = new Map(); // "name\0duid" -> generator
-  for (const r of rows) {
-    const name = r[col.name].trim(), duid = r[col.duid].trim();
-    const reg = Number(r[col.reg_cap].trim()), max = Number(r[col.max_cap].trim()); // '-' -> NaN
-    const key = `${name}\0${duid}`;
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, {
-        name,
-        participant_name: r[col.participant].trim(),
-        duid,
-        state: r[col.state].trim(),
-        technology_type: r[col.technology_type].trim(),
-        technology_description: r[col.technology_description].trim(),
-        fuel_type: r[col.fuel_type].trim(),
-        fuel_description: r[col.fuel_description].trim(),
-        reg_cap: Number.isNaN(reg) ? 0 : reg,
-        max_cap: Number.isNaN(max) ? 0 : max,
-      });
-    } else {
-      if (!Number.isNaN(reg)) existing.reg_cap += reg;
-      if (!Number.isNaN(max)) existing.max_cap += max;
-    }
-  }
-  return [...byKey.values()];
-}
-
-const sq = (s) => `'${s.replaceAll("'", "''")}'`;
-// Round float-sum artifacts (e.g. 0.1+0.2) to 6dp; capacities are MW with ≤2dp in source.
-const num = (n) => String(Math.round(n * 1e6) / 1e6);
-
 function selfCheck() {
   assert.deepEqual(
     parseCsv('a,"b, ""x""",c\r\nd,e,f\n'),
@@ -110,15 +65,15 @@ function selfCheck() {
     'Classification', 'Fuel Source - Primary', 'Fuel Source - Descriptor', 'Technology Type - Primary',
     'Technology Type - Descriptor', 'Physical Unit No.', 'Unit Size (MW)', 'Aggregation', 'DUID',
     'Reg Cap (MW)', 'Max Cap (MW)', 'Max ROC/Min'];
-  const col = resolveColumns(legacyHeader);
+  const col = resolveColumns(legacyHeader, COLUMNS);
   assert.deepEqual(
     [col.participant, col.name, col.state, col.duid, col.reg_cap, col.max_cap],
     [0, 1, 2, 13, 14, 15],
     'column resolution broke on the known AEMO layout',
   );
-  assert.throws(() => resolveColumns(legacyHeader.filter((h) => h !== 'DUID')),
+  assert.throws(() => resolveColumns(legacyHeader.filter((h) => h !== 'DUID'), COLUMNS),
     /missing required column: "DUID"/, 'missing column must be fatal');
-  assert.throws(() => resolveColumns([...legacyHeader, 'DUID']),
+  assert.throws(() => resolveColumns([...legacyHeader, 'DUID'], COLUMNS),
     /duplicate required column: "DUID"/, 'duplicate column must be fatal');
 
   const rows = [
@@ -136,19 +91,16 @@ function selfCheck() {
 selfCheck();
 
 const csvRows = parseCsv(readFileSync(CSV_PATH, 'utf-8'));
-const col = resolveColumns(csvRows.shift());
+const col = resolveColumns(csvRows.shift(), COLUMNS);
 const generators = collapseGenerators(csvRows, col);
 assert.ok(generators.length > 0, 'no generators parsed');
 
-const values = generators.map((g) =>
-  `(${[g.name, g.participant_name, g.duid, g.state, g.technology_type, g.technology_description, g.fuel_type, g.fuel_description]
-    .map(sq).join(',')},${num(g.reg_cap)},${num(g.max_cap)})`,
-);
+const values = generators.map(sqlTuple);
 
 const batches = [];
 for (let i = 0; i < values.length; i += 50) {
   batches.push(
-    'INSERT INTO generators (name,participant_name,duid,state,technology_type,technology_description,fuel_type,fuel_description,reg_cap,max_cap) VALUES\n'
+    `INSERT INTO generators (${GENERATOR_COLUMNS}) VALUES\n`
     + values.slice(i, i + 50).join(',\n') + ';',
   );
 }

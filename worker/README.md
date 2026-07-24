@@ -3,8 +3,9 @@
 Cloudflare Worker for the modernized NEM dispatch SCADA API. Stage 1 (LAB-416):
 project scaffold, D1 schema, R2 archive bucket, and the generator reference data
 seeded from the repo registration CSV. Stage 2 (LAB-417): the 5-minute Cron
-ingest of CURRENT Dispatch SCADA. Query endpoints and the frontend land in
-later stages.
+ingest of CURRENT Dispatch SCADA. Stage 4 (LAB-421): the weekly out-of-band
+generator-registration refresh from AEMO's live workbook. Query endpoints and
+the frontend land in other stages.
 
 Dev deployment: https://nem-api.raywalker.workers.dev (workers.dev is the dev
 environment). Production domain will be **nem.27b.io** — attached at DNS
@@ -74,9 +75,58 @@ ARCHIVE backfill (LAB-420).
 Failure handling: one bad file logs and the run continues (per-file
 isolation). NEMWEB's WAF rate-limits aggressive clients with 403s, so after 5
 *consecutive* failures the run aborts early rather than extending the block —
-the next run resumes where it stopped. DUIDs missing from `generators` (the
-2015 seed predates most solar/wind/battery units) are logged per run and their
-values dropped; the Stage 4 registration refresh (LAB-421) is the fix.
+the next run resumes where it stopped. DUIDs missing from `generators` are
+logged per run and their values dropped; the registration refresh below keeps
+that set small. `DG_*` (dummy generators) and `RT_*` (RERT reserve-trader
+units) are AEMO virtual dispatch units that never appear in the registration
+list — they are *expected* to stay in the unknown-DUID log.
+
+## Generator registration refresh (weekly, out-of-band)
+
+The DUID→generator reference data self-updates from AEMO's live
+[NEM Registration and Exemption List](https://www.aemo.com.au/-/media/Files/Electricity/NEM/Participant_Information/NEM-Registration-and-Exemption-List.xls)
+— deliberately **outside** the 5-minute hot path: units register roughly
+monthly, so `.github/workflows/refresh-generators.yml` runs **weekly**
+(Mon 19:43 UTC) and on manual dispatch. It calls
+`scripts/refresh-generators.mjs`, which
+
+1. fetches the workbook (browser User-Agent — AEMO's WAF 403s plain clients;
+   the file is served as `.xls` but is actually OOXML/xlsx, so `fflate` +
+   ~80 lines of XML extraction replace a spreadsheet library),
+2. maps the **"PU and Scheduled Loads"** sheet to the `generators` schema,
+   resolving columns by header name (the sheet has already drifted once:
+   `Reg Cap (MW)` → `Reg Cap generation (MW)`) and collapsing unit rows to
+   one generator per (station name, DUID) exactly like the seed
+   (`scripts/registration.mjs` is the shared logic),
+3. writes `refresh-upsert.sql`: `INSERT … ON CONFLICT(duid, name) DO UPDATE`
+   — existing rows keep their `id` (historical `scada_values` rows point at
+   it), new registrations insert, **nothing is ever deleted**. Generators
+   that drop out of AEMO's list simply stay put and stop receiving values.
+   (Renamed stations insert a new row — e.g. the seed's "Murray 1/2 Power
+   Station" and today's "Murray Power Station" coexist on DUID `MURRAY`;
+   ingest keeps attributing MURRAY values to the lowest id.)
+
+The workflow then applies the file with `wrangler d1 execute --remote`
+(same `CLOUDFLARE_API_TOKEN` secret as deploy).
+
+Fail-safe: any anomaly — fetch failure, renamed sheet, renamed/missing
+column, a suspiciously small list (< 400 generators) — aborts via `assert`
+before SQL is written, and a mapping self-check against a captured sample of
+the real sheet (`scripts/fixtures/nem-registration-sample.xlsx`) runs before
+every refresh *and* in CI (`npm run refresh:check`). A failed run leaves the
+existing reference data fully intact; the apply is idempotent, so re-running
+after a partial failure is always safe.
+
+Manual refresh — GitHub: Actions → "Refresh generators" → Run workflow, or
+`gh workflow run refresh-generators.yml`. Locally:
+
+```sh
+npm run refresh:generate   # fetch + parse -> refresh-upsert.sql (gitignored)
+npm run refresh:local      # apply to local D1 (or refresh:remote for prod)
+```
+
+Note: GitHub auto-disables scheduled workflows after ~60 days without repo
+activity; a manual dispatch re-enables the schedule.
 
 ## Migrations
 
@@ -114,12 +164,12 @@ into a fresh migration file instead (`cp` the regenerated file to
 `migrations/000N_reseed_generators.sql`).
 
 **DELETE + reinsert is only safe while `scada_values` is empty.** The generated
-seed starts with `DELETE FROM generators`, which reassigns ids — fine today,
-but once ingest has written value rows keyed by `generator_id`, a refresh must
-preserve ids: upsert on the `(duid, name)` identity (`generators_duid_name` —
-DUID alone is not unique) and retire generators missing from the new
-registration instead of deleting them. That id-stable refresh is LAB-421's
-scope, along with the live `.xls` registration source.
+seed starts with `DELETE FROM generators`, which reassigns ids — acceptable
+for the one-time bootstrap, but once ingest has written value rows keyed by
+`generator_id`, never re-run the seed against a live database. Ongoing updates
+are the registration refresh's job (see above): it upserts on the
+`(duid, name)` identity (`generators_duid_name` — DUID alone is not unique)
+so ids are preserved and nothing is deleted.
 
 ## Deploy
 

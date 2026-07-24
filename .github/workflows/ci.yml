@@ -40,6 +40,8 @@ jobs:
         run: |
           npm run seed:generate
           git diff --exit-code -- migrations/0002_seed_generators.sql
+      - name: Verify registration-refresh mapping (captured sheet sample)
+        run: npm run refresh:check
       - name: Apply local D1 migrations
         run: npm run migrate:local
       - name: Smoke-check local /health
