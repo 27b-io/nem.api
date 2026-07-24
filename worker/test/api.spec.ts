@@ -247,6 +247,25 @@ describe('/api/v2/values', () => {
     expect(body.end).toBe(T0 + 300);
     expect(body.timestamps).toEqual([T0]);
   });
+
+  it('interprets offset-less ISO strings as NEM time (AEST), never the runtime timezone', async () => {
+    // 2026-07-24T00:00:00 AEST == 2026-07-23T14:00:00Z.
+    const aestMidnight = Date.UTC(2026, 6, 23, 14, 0, 0) / 1000;
+
+    const naive = await (
+      await get(`/api/v2/values?time_start=${encodeURIComponent('2026-07-24T00:00:00')}&hours=1`)
+    ).json<ValuesBody>();
+    expect(naive.start).toBe(aestMidnight);
+
+    // Date-only means AEST midnight; an explicit offset is honoured as given.
+    const dateOnly = await (await get('/api/v2/values?time_start=2026-07-24&hours=1')).json<ValuesBody>();
+    expect(dateOnly.start).toBe(aestMidnight);
+
+    const explicit = await (
+      await get(`/api/v2/values?time_start=${encodeURIComponent('2026-07-23T14:00:00Z')}&hours=1`)
+    ).json<ValuesBody>();
+    expect(explicit.start).toBe(aestMidnight);
+  });
 });
 
 describe('/api/v2/values/aggregate', () => {

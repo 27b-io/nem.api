@@ -54,14 +54,16 @@ endpoint; the headline fuel-mix view is `values/aggregate` below.
   "end": 1784902200,          // resolved window end (null when open-ended "from now")
   "resolution": 300,          // bucket width in seconds actually used
   "truncated": false,         // true when the row limit cut the response short
-  "timestamps": [1784901600, 1784901900, 1784902200],  // shared x-axis, ascending, period-ENDING
+  // shared x-axis, ascending, period-ENDING: these buckets cover
+  // (1784901600, 1784901900] and (1784901900, 1784902200]
+  "timestamps": [1784901900, 1784902200],
   "series": [
     {
       "id": 12,               // generators.id
       "duid": "BAPS",         // AEMO dispatch unit id
       "name": "Banimboola Power Station",
       "fuel": "Hydro",        // generators.fuel_type (series coloring)
-      "values": [10, 12, 14]  // MW, aligned to `timestamps`; null = no sample in bucket
+      "values": [10, 12]      // MW, aligned to `timestamps`; null = no sample in bucket
     }
   ]
 }
@@ -84,6 +86,10 @@ with `offset`.
 | `time_start` | window start (unix seconds or ISO) |
 | `time_end` | window end (unix seconds or ISO) |
 | `minutes` / `hours` / `days` / `weeks` / `months` | relative window; first one present wins, in that order |
+
+ISO strings **without an explicit offset are NEM time (AEST, `+10:00`)** —
+the runtime timezone never leaks into parsing; a date-only string means AEST
+midnight. Explicit `Z` / `±hh:mm` offsets are honoured as given.
 
 Relative-window combinations: no start/end → from now, counting back
 (open-ended end); with `time_start` → `[start, start+window]` (a given
@@ -116,6 +122,13 @@ parameters — never interpolated.
 **Paging / order**: `limit` (integer 1–300000, default 300000), `offset`
 (default 0), `sort`/`order` = `<field>[,asc|desc]` with field one of `time`,
 `generator_id`, `value` (allowlisted; anything else is a 400).
+
+`limit`/`offset`/`sort` operate on the grouped **(bucket, generator) rows
+before pivoting** — they bound which data points the response covers, with
+deterministic `bucket, generator` tie-breaks for stable paging. They do not
+reorder the pivoted output: `timestamps` is always ascending regardless of
+`sort`. The same pre-pivot paging applies to `values/aggregate` (whose row
+order is fixed to time-ascending).
 
 ## `GET /api/v2/values/aggregate?group_by=fuel|tech|region`
 

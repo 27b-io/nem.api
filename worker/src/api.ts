@@ -67,10 +67,19 @@ interface TimeWindow {
   exact?: number;
 }
 
-/** Unix seconds from either a digit string (unix seconds) or an ISO date string. */
+/**
+ * Unix seconds from either a digit string (unix seconds) or an ISO date
+ * string. Offset-less ISO strings are interpreted as NEM time (AEST, +10:00)
+ * — never the runtime timezone — and date-only strings mean AEST midnight;
+ * explicit `Z`/`±hh:mm` offsets are honoured as given.
+ */
 function parseTimeParam(name: string, raw: string): number {
   if (/^\d+$/.test(raw)) return Number(raw);
-  const ms = Date.parse(raw);
+  let iso = raw;
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso)) {
+    iso = (iso.includes('T') ? iso : `${iso}T00:00:00`) + '+10:00';
+  }
+  const ms = Date.parse(iso);
   if (Number.isNaN(ms)) throw new ApiError(400, `invalid ${name}: expected unix seconds or an ISO date string`);
   return Math.floor(ms / 1000);
 }
