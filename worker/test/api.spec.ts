@@ -4,7 +4,8 @@ import { upsertValues } from '../src/ingest';
 import worker from '../src/index';
 
 // Fixed dispatch-interval base, aligned to an hour boundary (divisible by 300,
-// 1800 and 3600) so bucket expectations are exact.
+// 1800 and 3600) so bucket expectations are exact. scrape_time values are
+// period-ENDING (AEMO SETTLEMENTDATE convention), and so are bucket labels.
 const T0 = 1784901600;
 
 async function get(path: string): Promise<Response> {
@@ -34,12 +35,10 @@ beforeEach(async () => {
 });
 
 interface ValuesBody {
-  time: number;
-  duration: number;
-  num_results: number;
   start: number | null;
   end: number | null;
   resolution: number;
+  truncated: boolean;
   timestamps: number[];
   series: Array<{ id: number; duid: string | null; name: string | null; fuel: string | null; values: (number | null)[] }>;
 }
@@ -67,12 +66,14 @@ describe('/api/v2/values', () => {
     const body = await res.json<ValuesBody>();
     expect(body).not.toHaveProperty('sql');
     expect(body).not.toHaveProperty('vars');
-    expect(body.num_results).toBe(5);
+    // restify-era envelope residue is gone from the public contract.
+    expect(body).not.toHaveProperty('time');
+    expect(body).not.toHaveProperty('duration');
+    expect(body).not.toHaveProperty('num_results');
     expect(body.start).toBe(T0);
     expect(body.end).toBe(T0 + 600);
     expect(body.resolution).toBe(300);
-    expect(typeof body.time).toBe('number');
-    expect(typeof body.duration).toBe('number');
+    expect(body.truncated).toBe(false);
     expect(body.timestamps).toEqual([T0, T0 + 300, T0 + 600]);
 
     const bapsSeries = body.series.find((s) => s.id === baps);
@@ -82,22 +83,50 @@ describe('/api/v2/values', () => {
     expect(bw01Series?.values).toEqual([600, null, 620]);
   });
 
-  it('buckets server-side at a coarse resolution (hourly mean per generator)', async () => {
-    // 12 five-minute samples across one hour: 0..11 -> mean 5.5.
+  it('buckets server-side at a coarse resolution (hourly mean, period-ending label)', async () => {
+    // 12 five-minute samples with period-ending times inside the hour ending
+    // T0+3600: mean(1..12) = 6.5, labelled by the bucket END.
     await upsertValues(
       env.DB,
-      Array.from({ length: 12 }, (_, i) => ({ scrapeTime: T0 + i * 300, generatorId: baps, value: i })),
+      Array.from({ length: 12 }, (_, i) => ({ scrapeTime: T0 + (i + 1) * 300, generatorId: baps, value: i + 1 })),
     );
 
-    const res = await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 3599}&resolution=3600`);
+    const res = await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 3600}&resolution=3600`);
     const body = await res.json<ValuesBody>();
-    expect(body.timestamps).toEqual([T0]);
-    expect(body.num_results).toBe(1);
+    expect(body.timestamps).toEqual([T0 + 3600]);
     expect(body.series).toHaveLength(1);
-    expect(body.series[0].values).toEqual([5.5]);
+    expect(body.series[0].values).toEqual([6.5]);
   });
 
-  it('applies relative windows off a given start (legacy hours semantics)', async () => {
+  it('labels buckets period-ENDING: a boundary sample belongs to the bucket ending there', async () => {
+    await upsertValues(env.DB, [
+      { scrapeTime: T0, generatorId: baps, value: 1 }, // ends exactly at T0 -> bucket T0
+      { scrapeTime: T0 + 300, generatorId: baps, value: 2 }, // ends inside next period -> bucket T0+1800
+    ]);
+
+    const body = await (
+      await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 300}&resolution=1800`)
+    ).json<ValuesBody>();
+    expect(body.timestamps).toEqual([T0, T0 + 1800]);
+    expect(body.series[0].values).toEqual([1, 2]);
+  });
+
+  it('aligns daily buckets to NEM time (AEST midnight, not UTC)', async () => {
+    // 2026-07-25 00:00 AEST == 2026-07-24 14:00 UTC.
+    const dayEnd = Date.UTC(2026, 6, 24, 14, 0, 0) / 1000;
+    await upsertValues(env.DB, [
+      { scrapeTime: dayEnd - 3600, generatorId: baps, value: 5 }, // 23:00 AEST -> day ending dayEnd
+      { scrapeTime: dayEnd + 300, generatorId: baps, value: 7 }, // 00:05 AEST -> next day
+    ]);
+
+    const body = await (
+      await get(`/api/v2/values?time_start=${dayEnd - 3600}&time_end=${dayEnd + 300}&resolution=86400`)
+    ).json<ValuesBody>();
+    expect(body.timestamps).toEqual([dayEnd, dayEnd + 86400]);
+    expect(body.series[0].values).toEqual([5, 7]);
+  });
+
+  it('applies relative windows off a given start (hours semantics)', async () => {
     await upsertValues(env.DB, [
       { scrapeTime: T0, generatorId: baps, value: 1 },
       { scrapeTime: T0 + 3600, generatorId: baps, value: 2 },
@@ -122,7 +151,7 @@ describe('/api/v2/values', () => {
     ]);
 
     const body = await (await get('/api/v2/values')).json<ValuesBody>();
-    expect(body.num_results).toBe(1);
+    expect(body.timestamps).toHaveLength(1);
     expect(body.series[0].values).toEqual([42]);
   });
 
@@ -137,24 +166,30 @@ describe('/api/v2/values', () => {
     expect(body.series.map((s) => s.id)).toEqual([baps]);
   });
 
-  it('rounds limit up to a multiple of 288 (legacy behaviour) and honours offset', async () => {
-    // 300 samples for one generator; limit=1 -> effective 288.
+  it('clamps limit as a plain integer, reports truncation, and honours offset', async () => {
     await upsertValues(
       env.DB,
       Array.from({ length: 300 }, (_, i) => ({ scrapeTime: T0 + i * 300, generatorId: baps, value: i })),
     );
+    const range = `time_start=${T0}&time_end=${T0 + 299 * 300}&resolution=300`;
 
-    const first = await (
-      await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 299 * 300}&resolution=300&limit=1`)
-    ).json<ValuesBody>();
-    expect(first.num_results).toBe(288);
+    const first = await (await get(`/api/v2/values?${range}&limit=100`)).json<ValuesBody>();
+    expect(first.timestamps).toHaveLength(100);
     expect(first.timestamps[0]).toBe(T0);
+    expect(first.truncated).toBe(true);
 
-    const rest = await (
-      await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 299 * 300}&resolution=300&limit=1&offset=288`)
-    ).json<ValuesBody>();
-    expect(rest.num_results).toBe(12);
-    expect(rest.timestamps[0]).toBe(T0 + 288 * 300);
+    const rest = await (await get(`/api/v2/values?${range}&limit=100&offset=100`)).json<ValuesBody>();
+    expect(rest.timestamps[0]).toBe(T0 + 100 * 300);
+
+    const all = await (await get(`/api/v2/values?${range}`)).json<ValuesBody>();
+    expect(all.timestamps).toHaveLength(300);
+    expect(all.truncated).toBe(false);
+  });
+
+  it('rejects malformed limit/offset explicitly', async () => {
+    expect((await get('/api/v2/values?limit=0')).status).toBe(400);
+    expect((await get('/api/v2/values?limit=lots')).status).toBe(400);
+    expect((await get('/api/v2/values?offset=-1')).status).toBe(400);
   });
 
   it('supports sort=time,desc', async () => {
@@ -166,17 +201,18 @@ describe('/api/v2/values', () => {
     // Descending row order changes which rows a LIMIT window covers; the
     // pivoted timestamps axis stays ascending by contract.
     const body = await (
-      await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 300}&resolution=300&sort=time,desc&limit=288`)
+      await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 300}&resolution=300&sort=time,desc`)
     ).json<ValuesBody>();
     expect(body.timestamps).toEqual([T0, T0 + 300]);
-    expect(body.num_results).toBe(2);
   });
 
-  it('rejects an unknown sort column instead of interpolating it (legacy injection hole)', async () => {
+  it('rejects unknown sort columns instead of interpolating them (incl. the dropped scrape_time alias)', async () => {
     const res = await get('/api/v2/values?sort=value;DROP TABLE generators;--');
     expect(res.status).toBe(400);
-    const body = await res.json<{ error: string }>();
-    expect(body.error).toContain('invalid sort');
+    expect((await res.json<{ error: string }>()).error).toContain('invalid sort');
+
+    // Storage-column vocabulary is no longer public sort surface.
+    expect((await get('/api/v2/values?sort=scrape_time')).status).toBe(400);
   });
 
   it('binds filter values: an injection attempt matches nothing and damages nothing', async () => {
@@ -187,7 +223,8 @@ describe('/api/v2/values', () => {
     );
     expect(res.status).toBe(200);
     const body = await res.json<ValuesBody>();
-    expect(body.num_results).toBe(0);
+    expect(body.series).toEqual([]);
+    expect(body.timestamps).toEqual([]);
 
     const still = await env.DB.prepare('SELECT count(*) AS n FROM generators').first<{ n: number }>();
     expect(still?.n).toBe(350);
@@ -208,30 +245,30 @@ describe('/api/v2/values', () => {
     ).json<ValuesBody>();
     expect(body.start).toBe(T0);
     expect(body.end).toBe(T0 + 300);
-    expect(body.num_results).toBe(1);
+    expect(body.timestamps).toEqual([T0]);
   });
 });
 
 describe('/api/v2/values/aggregate', () => {
-  it('groups totals by fuel over time buckets (mean of per-interval sums)', async () => {
+  it('groups totals by fuel over time buckets (mean of per-interval sums, period-ending label)', async () => {
     await upsertValues(env.DB, [
-      // Interval 1: Hydro 10, Fossil 600 + 700.
-      { scrapeTime: T0, generatorId: baps, value: 10 },
-      { scrapeTime: T0, generatorId: bw01, value: 600 },
-      { scrapeTime: T0, generatorId: er01, value: 700 },
-      // Interval 2 (same 30-min bucket): Hydro 20, Fossil 620 + 680.
-      { scrapeTime: T0 + 300, generatorId: baps, value: 20 },
-      { scrapeTime: T0 + 300, generatorId: bw01, value: 620 },
-      { scrapeTime: T0 + 300, generatorId: er01, value: 680 },
+      // Interval ending T0+300: Hydro 10, Fossil 600 + 700.
+      { scrapeTime: T0 + 300, generatorId: baps, value: 10 },
+      { scrapeTime: T0 + 300, generatorId: bw01, value: 600 },
+      { scrapeTime: T0 + 300, generatorId: er01, value: 700 },
+      // Interval ending T0+600 (same 30-min bucket ending T0+1800): Hydro 20, Fossil 620 + 680.
+      { scrapeTime: T0 + 600, generatorId: baps, value: 20 },
+      { scrapeTime: T0 + 600, generatorId: bw01, value: 620 },
+      { scrapeTime: T0 + 600, generatorId: er01, value: 680 },
     ]);
 
     const res = await get(
-      `/api/v2/values/aggregate?group_by=fuel&time_start=${T0}&time_end=${T0 + 300}&resolution=1800`,
+      `/api/v2/values/aggregate?group_by=fuel&time_start=${T0}&time_end=${T0 + 600}&resolution=1800`,
     );
     expect(res.status).toBe(200);
     const body = await res.json<AggregateBody>();
     expect(body.group_by).toBe('fuel');
-    expect(body.timestamps).toEqual([T0]);
+    expect(body.timestamps).toEqual([T0 + 1800]);
     // Fossil: mean(1300, 1300) = 1300; Hydro: mean(10, 20) = 15.
     expect(body.series).toEqual([
       { key: 'Fossil', values: [1300] },
@@ -239,16 +276,32 @@ describe('/api/v2/values/aggregate', () => {
     ]);
   });
 
-  it('groups by state and composes with generator filters', async () => {
+  it('groups by region (first-class NEM dimension) and composes with generator filters', async () => {
     await upsertValues(env.DB, [
       { scrapeTime: T0, generatorId: baps, value: 10 }, // VIC1 Hydro
       { scrapeTime: T0, generatorId: bw01, value: 600 }, // NSW1 Fossil
     ]);
 
     const body = await (
-      await get(`/api/v2/values/aggregate?group_by=state&time_start=${T0}&time_end=${T0}&fuel=Fossil`)
+      await get(`/api/v2/values/aggregate?group_by=region&time_start=${T0}&time_end=${T0}&fuel=Fossil`)
     ).json<AggregateBody>();
+    expect(body.group_by).toBe('region');
     expect(body.series).toEqual([{ key: 'NSW1', values: [600] }]);
+  });
+
+  it('nets negative values through the sum (storage charging / station load convention)', async () => {
+    await upsertValues(env.DB, [
+      { scrapeTime: T0, generatorId: baps, value: 10 }, // Hydro generating
+      { scrapeTime: T0, generatorId: bw01, value: -5 }, // Fossil unit drawing (station load)
+    ]);
+
+    const body = await (
+      await get(`/api/v2/values/aggregate?group_by=fuel&time_start=${T0}&time_end=${T0}`)
+    ).json<AggregateBody>();
+    expect(body.series).toEqual([
+      { key: 'Fossil', values: [-5] },
+      { key: 'Hydro', values: [10] },
+    ]);
   });
 
   it('rejects a missing or unknown group_by', async () => {
@@ -267,31 +320,36 @@ describe('/api/v2/generators', () => {
     fuel_description: string | null;
   }
 
-  it('infers = for a plain value', async () => {
-    const res = await get('/api/v2/generators?state=VIC1');
-    expect(res.status).toBe(200);
-    const rows = await res.json<GeneratorRow[]>();
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows.every((r) => r.state === 'VIC1')).toBe(true);
+  it('infers = for a plain value; region is canonical with state as alias', async () => {
+    const byRegion = await (await get('/api/v2/generators?region=VIC1')).json<GeneratorRow[]>();
+    expect(byRegion.length).toBeGreaterThan(0);
+    expect(byRegion.every((r) => r.state === 'VIC1')).toBe(true);
+
+    const byState = await (await get('/api/v2/generators?state=VIC1')).json<GeneratorRow[]>();
+    expect(byState).toEqual(byRegion);
   });
 
   it('infers IN for comma-separated values', async () => {
-    const rows = await (await get('/api/v2/generators?state=VIC1,NSW1')).json<GeneratorRow[]>();
+    const rows = await (await get('/api/v2/generators?region=VIC1,NSW1')).json<GeneratorRow[]>();
     const states = new Set(rows.map((r) => r.state));
     expect(states).toEqual(new Set(['VIC1', 'NSW1']));
   });
 
-  it('infers LIKE for wildcard values (* -> %)', async () => {
+  it('infers LIKE only for * (the sole public wildcard); % is a literal', async () => {
     const rows = await (await get('/api/v2/generators?fuel_desc=Wat*')).json<GeneratorRow[]>();
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((r) => r.fuel_description?.startsWith('Wat'))).toBe(true);
+
+    // % no longer opens a LIKE — it is compared literally and matches nothing here.
+    const literal = await (await get('/api/v2/generators?fuel_desc=Wat%25')).json<GeneratorRow[]>();
+    expect(literal).toEqual([]);
   });
 
-  it('supports duid selection (v2 addition) and respects legacy alias precedence', async () => {
+  it('supports duid selection and canonical-over-alias resolution', async () => {
     const rows = await (await get('/api/v2/generators?duid=BAPS,BW01')).json<GeneratorRow[]>();
     expect(new Set(rows.map((r) => r.duid))).toEqual(new Set(['BAPS', 'BW01']));
 
-    // `fuel` beats `fuel_type` when both are present, as in legacy.
+    // Canonical `fuel` wins when its column alias `fuel_type` is also present.
     const fuelWins = await (await get('/api/v2/generators?fuel=Hydro&fuel_type=Fossil')).json<GeneratorRow[]>();
     expect(fuelWins.length).toBeGreaterThan(0);
     expect(fuelWins.every((r) => r.fuel_type === 'Hydro')).toBe(true);
@@ -299,7 +357,7 @@ describe('/api/v2/generators', () => {
 
   it('binds injection attempts harmlessly', async () => {
     const rows = await (
-      await get(`/api/v2/generators?state=${encodeURIComponent("x'; DROP TABLE generators;--")}`)
+      await get(`/api/v2/generators?region=${encodeURIComponent("x'; DROP TABLE generators;--")}`)
     ).json<GeneratorRow[]>();
     expect(rows).toEqual([]);
     const still = await env.DB.prepare('SELECT count(*) AS n FROM generators').first<{ n: number }>();

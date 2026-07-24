@@ -6,14 +6,16 @@ seeded from the repo registration CSV. Stage 2 (LAB-417): the 5-minute Cron
 ingest of CURRENT Dispatch SCADA. Stage 3 (LAB-418): the v2 query API. The
 frontend lands in a later stage.
 
-## Query API (v2)
+## Query API (v2) — public
 
-`src/api.ts` — `GET /api/v2/values`, `GET /api/v2/values/aggregate?group_by=fuel|tech|state`,
-and `GET /api/v2/generators`, serving from D1 with the legacy query grammar
-(time windows, generator filters, `,`→IN / `*`→LIKE operator inference)
-preserved, all user input bound (never interpolated), server-side time
-bucketing, and a columnar lib-agnostic payload. The pinned request/response
-contract lives in [`API.md`](./API.md) — it is owned jointly with the LAB-419
+`src/api.ts` — `GET /api/v2/values`, `GET /api/v2/values/aggregate?group_by=fuel|tech|region`,
+and `GET /api/v2/generators`, serving from D1. A **greenfields public
+contract** (public until abuse is detected — ray, 2026-07-24; the legacy 2015
+API is reference-only): columnar lib-agnostic payload, period-ending NEM-time
+buckets (AEST, daily buckets end at AEST midnight), net-MW aggregate
+convention, all user input bound (never interpolated), and allowlisted
+sort/group_by/resolution identifiers. The pinned request/response contract
+lives in [`API.md`](./API.md) — it is owned jointly with the LAB-419
 frontend; change both together.
 
 Dev deployment: https://nem-api.raywalker.workers.dev (workers.dev is the dev

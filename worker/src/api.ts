@@ -1,28 +1,30 @@
 // HTTP query API (LAB-418): /api/v2/values, /api/v2/values/aggregate,
-// /api/v2/generators — the v2 port of the legacy restify API (api/v1.1).
-// Payload contract: worker/API.md (owned jointly with the LAB-419 frontend).
+// /api/v2/generators — a greenfields v2 contract over the D1 store. PUBLIC
+// (ray, 2026-07-24: public until abuse is detected), so the contract in
+// worker/API.md (owned jointly with the LAB-419 frontend) is the product.
+// The legacy restify API (api/v1.1) is reference-only, not a contract.
 //
-// Deliberate changes vs legacy:
-// - Columnar, lib-agnostic payload (shared `timestamps` + aligned per-series
-//   `values` arrays), not the Highcharts per-series [x,y] map.
-// - Every user value reaches SQL as a bound parameter (legacy concatenated
-//   strings, including raw ORDER BY injection via `sort`), and the response
-//   no longer echoes `sql`/`vars` back to the client (info disclosure).
-// - No time params defaults to the last 24 hours; legacy scanned from epoch 0.
-// - Server-side time bucketing (`resolution`), and a working values/aggregate
-//   (the legacy route required ./scada/aggregate.js, which never existed).
-// - The EXPLAIN QUERY PLAN `explain` passthrough is not ported (dead debug aid).
-// Preserved: the query grammar — time-window semantics, filter aliases and
-// their precedence, operator inference (`,` -> IN, `*`/`%` -> LIKE, else `=`),
-// and the limit cap + round-up-to-288 behaviour.
+// Contract essentials:
+// - Columnar, lib-agnostic payload: shared ascending `timestamps` + aligned
+//   per-series `values` arrays with null gaps.
+// - Buckets are period-ENDING and aligned to NEM time (AEST, UTC+10, no DST),
+//   matching AEMO's period-ending SETTLEMENTDATE convention; daily buckets
+//   end at AEST midnight.
+// - Every user value reaches SQL as a bound parameter; sort/group_by/
+//   resolution identifiers are allowlisted. No `sql`/`vars` echo.
+// - No time params defaults to the last 24 hours.
+// - Aggregate values are NET MW: storage charging / station load draw stays
+//   negative through SUM (see API.md for the convention).
 
 import type { Env } from './index';
 
-const MAX_LIMIT = 300000; // legacy cap
-const LIMIT_MULTIPLE = 288; // 5-min samples per generator per day; legacy rounded limits up to this
-const LIMIT_CAP = Math.ceil(MAX_LIMIT / LIMIT_MULTIPLE) * LIMIT_MULTIPLE; // 300096, the legacy effective default
+const MAX_LIMIT = 300000;
 const DEFAULT_WINDOW_SECONDS = 86400;
 const RESOLUTIONS = [300, 1800, 3600, 86400];
+// NEM market time is AEST (UTC+10, no DST). 36000 % res === 0 for every
+// sub-daily resolution, so the offset only shifts daily bucket boundaries
+// (to AEST midnight) — sub-daily buckets are unaffected by it.
+const NEM_UTC_OFFSET_SECONDS = 36000;
 
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
@@ -100,8 +102,8 @@ const RELATIVE_WINDOWS: Array<[name: string, secondsPerUnit: number | 'months']>
  * Without a window, `time` (exact) / `time_start` / `time_end` apply directly.
  */
 function resolveTimeWindow(params: URLSearchParams, nowSeconds: number): TimeWindow {
-  const rawStart = firstParam(params, ['time_start', 'start_time', 'start']);
-  const rawEnd = firstParam(params, ['time_end', 'end_time', 'end']);
+  const rawStart = firstParam(params, ['time_start']);
+  const rawEnd = firstParam(params, ['time_end']);
   const start = rawStart === undefined ? undefined : parseTimeParam('time_start', rawStart);
   const end = rawEnd === undefined ? undefined : parseTimeParam('time_end', rawEnd);
 
@@ -157,27 +159,32 @@ interface SqlFragment {
   binds: (string | number)[];
 }
 
-// Alias order encodes legacy precedence: `fuel` beat `fuel_type`;
-// `tech_type` beat `tech` beat `type` (legacy assigned in that order, last won).
-// `duid` is a v2 addition so the frontend can select specific units.
+// One canonical param per field plus at most one alias (the storage column
+// name, or `state` for region). First non-empty wins — canonical over alias.
+// `region` is the canonical NEM dimension (QLD1/NSW1/VIC1/SA1/TAS1), stored
+// in the `state` column.
 const GENERATOR_FILTERS: Array<{ column: string; aliases: string[] }> = [
-  { column: 'state', aliases: ['state'] },
+  { column: 'state', aliases: ['region', 'state'] },
   { column: 'fuel_type', aliases: ['fuel', 'fuel_type'] },
   { column: 'fuel_description', aliases: ['fuel_desc', 'fuel_description'] },
-  { column: 'technology_type', aliases: ['tech_type', 'tech', 'type'] },
-  { column: 'technology_description', aliases: ['tech_desc', 'tech_description'] },
+  { column: 'technology_type', aliases: ['tech', 'technology_type'] },
+  { column: 'technology_description', aliases: ['tech_desc', 'technology_description'] },
   { column: 'duid', aliases: ['duid'] },
 ];
 
-// Legacy operator inference, now emitting bound parameters:
-// a comma means IN, `*`/`%` means LIKE (with `*` -> `%`), anything else `=`.
+// Operator inference, all values bound: a comma means IN, `*` means LIKE
+// (`*` -> `%`, with literal `%`/`_` escaped — `*` is the only public
+// wildcard), anything else `=`.
 function filterClause(column: string, qualifiedColumn: string, raw: string): SqlFragment {
   if (raw.includes(',')) {
     const items = raw.split(',').filter((s) => s !== '');
     if (items.length === 0) throw new ApiError(400, `empty value list for ${column}`);
     return { sql: `${qualifiedColumn} IN (${items.map(() => '?').join(',')})`, binds: items };
   }
-  if (/[%*]/.test(raw)) return { sql: `${qualifiedColumn} LIKE ?`, binds: [raw.replace(/\*/g, '%')] };
+  if (raw.includes('*')) {
+    const pattern = raw.replace(/[\\%_]/g, (m) => `\\${m}`).replace(/\*/g, '%');
+    return { sql: `${qualifiedColumn} LIKE ? ESCAPE '\\'`, binds: [pattern] };
+  }
   return { sql: `${qualifiedColumn} = ?`, binds: [raw] };
 }
 
@@ -193,32 +200,39 @@ function generatorFilters(params: URLSearchParams, columnPrefix = ''): SqlFragme
 // ---------------------------------------------------------------------------
 // limit / offset / sort
 
-/**
- * Legacy limit semantics: valid limits round UP to a multiple of 288 (one
- * generator-day of 5-min samples), everything else falls back to the cap —
- * so the effective ceiling and default are both 300096.
- */
+/** Plain integer clamp: 1..300000, default = the cap. Garbage is a 400, not a silent fallback. */
 function resolveLimit(params: URLSearchParams): { limit: number; offset: number } {
   const rawLimit = firstParam(params, ['limit']);
-  let limit = LIMIT_CAP;
-  if (rawLimit !== undefined && /^\d+$/.test(rawLimit)) {
-    const n = Number(rawLimit);
-    if (n >= 1 && n <= MAX_LIMIT) limit = Math.ceil(n / LIMIT_MULTIPLE) * LIMIT_MULTIPLE;
+  let limit = MAX_LIMIT;
+  if (rawLimit !== undefined) {
+    if (!/^\d+$/.test(rawLimit) || Number(rawLimit) === 0) {
+      throw new ApiError(400, `invalid limit: expected an integer between 1 and ${MAX_LIMIT}`);
+    }
+    limit = Math.min(Number(rawLimit), MAX_LIMIT);
   }
   const rawOffset = firstParam(params, ['offset']);
-  const offset = rawOffset !== undefined && /^\d+$/.test(rawOffset) ? Number(rawOffset) : 0;
-  return { limit, offset };
+  if (rawOffset !== undefined && !/^\d+$/.test(rawOffset)) {
+    throw new ApiError(400, 'invalid offset: expected a non-negative integer');
+  }
+  return { limit, offset: rawOffset === undefined ? 0 : Number(rawOffset) };
 }
 
-// Allowlisted sort columns — the legacy API interpolated `sort` raw into
-// ORDER BY, which was an injection hole. Keys are the public names; values
-// are columns of the bucketed SELECT.
+// Allowlisted sort columns — never interpolate user text into ORDER BY.
+// Keys are the public names; values are columns of the bucketed SELECT.
 const SORT_COLUMNS: Record<string, string> = {
   time: 'bucket',
-  scrape_time: 'bucket',
   generator_id: 'gid',
   value: 'value',
 };
+
+/**
+ * Bucket label expression: period-ENDING (AEMO SETTLEMENTDATE convention — a
+ * sample ending exactly on a boundary belongs to the bucket ending there),
+ * aligned to NEM time. `resolution` is a server-validated allowlist member.
+ */
+function bucketExpr(column: string, resolution: number): string {
+  return `((${column} + ${NEM_UTC_OFFSET_SECONDS + resolution - 1}) / ${resolution}) * ${resolution} - ${NEM_UTC_OFFSET_SECONDS}`;
+}
 
 function resolveOrder(params: URLSearchParams): string {
   const raw = firstParam(params, ['sort', 'order']);
@@ -268,20 +282,11 @@ function timeClauses(window: TimeWindow, column: string): SqlFragment[] {
   return clauses;
 }
 
-function envelope(requestTimeMs: number, numResults: number, extra: Record<string, unknown>) {
-  return {
-    time: requestTimeMs,
-    duration: Date.now() - requestTimeMs,
-    num_results: numResults,
-    ...extra,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Handlers
 
-async function handleValues(env: Env, params: URLSearchParams, requestTimeMs: number): Promise<Response> {
-  const nowSeconds = Math.floor(requestTimeMs / 1000);
+async function handleValues(env: Env, params: URLSearchParams): Promise<Response> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
   const window = resolveTimeWindow(params, nowSeconds);
   const resolution = resolveResolution(params, window, nowSeconds);
   const { limit, offset } = resolveLimit(params);
@@ -295,9 +300,8 @@ async function handleValues(env: Env, params: URLSearchParams, requestTimeMs: nu
     });
   }
 
-  // `resolution` is a server-validated allowlist member, never user text.
   const sql =
-    `SELECT (sv.scrape_time / ${resolution}) * ${resolution} AS bucket, ` +
+    `SELECT ${bucketExpr('sv.scrape_time', resolution)} AS bucket, ` +
     'sv.generator_id AS gid, ROUND(AVG(sv.value), 4) AS value ' +
     'FROM scada_values sv ' +
     `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
@@ -332,42 +336,47 @@ async function handleValues(env: Env, params: URLSearchParams, requestTimeMs: nu
       };
     });
 
-  return json(
-    envelope(requestTimeMs, results.length, {
-      start: window.start ?? null,
-      end: window.end ?? null,
-      resolution,
-      timestamps,
-      series,
-    }),
-  );
+  return json({
+    start: window.start ?? null,
+    end: window.end ?? null,
+    resolution,
+    truncated: results.length === limit,
+    timestamps,
+    series,
+  });
 }
 
+// `region` is the canonical NEM dimension; `state` (the storage column) is
+// kept as its alias. `fuel`/`tech` group the corresponding *_type columns.
 const GROUP_COLUMNS: Record<string, string> = {
   fuel: 'fuel_type',
   tech: 'technology_type',
+  region: 'state',
   state: 'state',
 };
 
-async function handleAggregate(env: Env, params: URLSearchParams, requestTimeMs: number): Promise<Response> {
+async function handleAggregate(env: Env, params: URLSearchParams): Promise<Response> {
   const groupBy = firstParam(params, ['group_by']);
   const groupColumn = groupBy === undefined ? undefined : GROUP_COLUMNS[groupBy];
   if (groupColumn === undefined) {
     throw new ApiError(400, `invalid group_by: expected one of ${Object.keys(GROUP_COLUMNS).join(', ')}`);
   }
 
-  const nowSeconds = Math.floor(requestTimeMs / 1000);
+  const nowSeconds = Math.floor(Date.now() / 1000);
   const window = resolveTimeWindow(params, nowSeconds);
   const resolution = resolveResolution(params, window, nowSeconds);
   const { limit, offset } = resolveLimit(params);
 
   const where = [...timeClauses(window, 'sv.scrape_time'), ...generatorFilters(params, 'g.')];
 
-  // Inner query: instantaneous total MW per (dispatch interval, group).
-  // Outer query: mean of those totals per bucket — mean-of-sums, which stays
-  // correct when a generator misses an interval inside the bucket.
+  // Inner query: instantaneous NET total MW per (dispatch interval, group) —
+  // negative values (storage charging, station load draw) sum through, per
+  // the net convention in API.md. Generators with a NULL group value land in
+  // the '' series rather than being dropped. Outer query: mean of those
+  // totals per bucket — mean-of-sums, which stays correct when a generator
+  // misses an interval inside the bucket.
   const sql =
-    `SELECT (t / ${resolution}) * ${resolution} AS bucket, grp, ROUND(AVG(total), 4) AS value FROM (` +
+    `SELECT ${bucketExpr('t', resolution)} AS bucket, grp, ROUND(AVG(total), 4) AS value FROM (` +
     `SELECT sv.scrape_time AS t, COALESCE(g.${groupColumn}, '') AS grp, SUM(sv.value) AS total ` +
     'FROM scada_values sv JOIN generators g ON g.id = sv.generator_id ' +
     `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
@@ -384,16 +393,15 @@ async function handleAggregate(env: Env, params: URLSearchParams, requestTimeMs:
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, values]) => ({ key, values }));
 
-  return json(
-    envelope(requestTimeMs, results.length, {
-      group_by: groupBy,
-      start: window.start ?? null,
-      end: window.end ?? null,
-      resolution,
-      timestamps,
-      series,
-    }),
-  );
+  return json({
+    group_by: groupBy,
+    start: window.start ?? null,
+    end: window.end ?? null,
+    resolution,
+    truncated: results.length === limit,
+    timestamps,
+    series,
+  });
 }
 
 async function handleGenerators(env: Env, params: URLSearchParams): Promise<Response> {
@@ -419,16 +427,15 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
   if (request.method !== 'GET') return jsonError(405, 'method not allowed');
 
-  const requestTimeMs = Date.now();
   const url = new URL(request.url);
   const route = url.pathname.replace(/\/+$/, '');
 
   try {
     switch (route) {
       case '/api/v2/values':
-        return await handleValues(env, url.searchParams, requestTimeMs);
+        return await handleValues(env, url.searchParams);
       case '/api/v2/values/aggregate':
-        return await handleAggregate(env, url.searchParams, requestTimeMs);
+        return await handleAggregate(env, url.searchParams);
       case '/api/v2/generators':
         return await handleGenerators(env, url.searchParams);
       default:
