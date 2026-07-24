@@ -3,7 +3,8 @@
 Cloudflare Worker for the modernized NEM dispatch SCADA API. Stage 1 (LAB-416):
 project scaffold, D1 schema, R2 archive bucket, and the generator reference data
 seeded from the repo registration CSV. Stage 2 (LAB-417): the 5-minute Cron
-ingest of CURRENT Dispatch SCADA. Stage 3 (LAB-418): the v2 query API. The
+ingest of CURRENT Dispatch SCADA. Stage 3 (LAB-418): the v2 query API.
+Stage 4 (LAB-420): the ARCHIVE daily backfill (~13 months of history). The
 frontend lands in a later stage.
 
 ## Query API (v2) — public
@@ -80,8 +81,8 @@ If cron intervals are missed (deploy freeze, outage), the next run catches up
 automatically: discovery diffs the whole CURRENT listing (~2 days of files)
 against the ledger. Catch-up is bounded to 50 files per run
 (`MAX_FILES_PER_RUN`) — a cold start over the full listing drains in about an
-hour of 5-minute runs. Gaps longer than CURRENT's ~2-day window need the
-ARCHIVE backfill (LAB-420).
+hour of 5-minute runs. Gaps longer than CURRENT's ~2-day window heal via the
+ARCHIVE backfill cron (below) as soon as the affected daily zips are published.
 
 Failure handling: one bad file logs and the run continues (per-file
 isolation). NEMWEB's WAF rate-limits aggressive clients with 403s, so after 5
@@ -89,6 +90,65 @@ isolation). NEMWEB's WAF rate-limits aggressive clients with 403s, so after 5
 the next run resumes where it stopped. DUIDs missing from `generators` (the
 2015 seed predates most solar/wind/battery units) are logged per run and their
 values dropped; the Stage 4 registration refresh (LAB-421) is the fix.
+
+## ARCHIVE backfill (Cron, every 15 minutes)
+
+`src/backfill.ts` (LAB-420), on its own cron schedule (`11,26,41,56 * * * *` —
+the string in `wrangler.toml` must stay byte-identical to `BACKFILL_CRON`,
+which `src/index.ts` dispatches on). NEMWEB's ARCHIVE
+(`https://nemweb.com.au/Reports/ARCHIVE/Dispatch_SCADA/`) holds a rolling
+~13 months of daily zips, each a zip-of-zips wrapping that day's 288
+five-minute files. Per run the backfill diffs the ARCHIVE listing against the
+`scrape` ledger (daily filenames — `PUBLIC_DISPATCHSCADA_<YYYYMMDD>.zip` —
+share the ledger with the five-minute files; a GLOB keeps them apart) and
+ingests up to 4 pending days, oldest first: nested unzip (`fflate`), the same
+parse/map path as the CURRENT ingest, idempotent chunked upserts, raw daily
+zip archived to R2 at `archive/<filename>`, ledger write last.
+
+From an empty ledger the full archive (~375 days, ~61k values/day at current
+DUID coverage) drains in roughly a day of wall time, then each run idles for
+the cost of a listing fetch and one ledger query, picking up new daily zips as
+ARCHIVE publishes them — the backfill doubles as a standing gap healer for
+outages longer than CURRENT's ~2-day window. Days already covered by the
+CURRENT ingest overlap harmlessly (same upsert key). Retries read the raw zip
+back from R2 instead of re-downloading (the object is only written after a
+full successful parse, so it is always valid). Inner five-minute entries that
+fail to parse are logged and skipped — the archive is immutable, so a defect
+there would otherwise retry forever — while whole-day failures (fetch errors,
+zero parsed rows) leave the day unledgered for retry, with the same
+consecutive-failure abort as the CURRENT ingest to respect NEMWEB's WAF.
+
+Each ingested day logs a sanity line (`288 file(s), 288 interval(s), N
+value(s)`) and a `GAPS:` warning on any deviation. To check progress or
+completion against the deployed database:
+
+```sh
+# pending == 0 in the run logs means drained; per-day interval coverage:
+npx wrangler d1 execute nem-api-db --remote --command "
+  SELECT date(scrape_time,'unixepoch','+10 hours') AS day,
+         count(DISTINCT scrape_time) AS intervals
+  FROM scada_values GROUP BY day HAVING intervals < 288 ORDER BY day"
+npx wrangler d1 info nem-api-db   # database size vs the 10GB cap
+```
+
+Boundary note for that query: a daily zip covers settlement times 00:05
+through 24:00, so each calendar day's midnight interval comes from the
+*previous* day's zip — the oldest backfilled day reports 287 and the day after
+the newest reports 1. Those two rows are the settlement-date convention, not
+gaps. Sizing, measured locally at 19.4 bytes/row: the current window ingests
+~23M rows ≈ ~450MB; once the LAB-421 registration refresh makes all ~510
+DUIDs resolvable, a full window is ~55M rows ≈ ~1.1GB — inside D1's 10GB cap.
+
+**Re-ingesting after a registration refresh (LAB-421):** values for DUIDs
+missing from `generators` are dropped (logged per run), but the raw daily zips
+survive in R2. Once the refresh lands, clear the daily ledger entries and the
+cron re-ingests every day from R2 (no NEMWEB re-download), filling in the
+previously unknown DUIDs — existing rows upsert to the same values:
+
+```sh
+npx wrangler d1 execute nem-api-db --remote --command \
+  "DELETE FROM scrape WHERE filename GLOB 'PUBLIC_DISPATCHSCADA_????????.zip'"
+```
 
 ## Migrations
 
