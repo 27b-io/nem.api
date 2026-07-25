@@ -8,8 +8,12 @@ import worker from '../src/index';
 // period-ENDING (AEMO SETTLEMENTDATE convention), and so are bucket labels.
 const T0 = 1784901600;
 
+// Cache keys include the request host (src/cache.ts), so a unique host per
+// test isolates the shared Cache API — same reason as the D1 DELETE below.
+let host: string;
+
 async function get(path: string): Promise<Response> {
-  return worker.fetch(new Request(`https://nem-api.test${path}`), env);
+  return worker.fetch(new Request(`https://${host}${path}`), env);
 }
 
 async function gidOf(duid: string): Promise<number> {
@@ -29,6 +33,7 @@ beforeEach(async () => {
   // vitest-pool-workers 0.18 (cloudflareTest plugin) has no per-test storage
   // isolation — tests in a file share one D1, so clear values explicitly.
   await env.DB.prepare('DELETE FROM scada_values').run();
+  host = `t-${crypto.randomUUID()}.test`;
   baps = await gidOf('BAPS');
   bw01 = await gidOf('BW01');
   er01 = await gidOf('ER01');
