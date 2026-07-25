@@ -32,11 +32,14 @@ the source-parity checks before the production route is deployed. Deploying the
 default branch attaches `nem.27b.io` through the `routes` entry in
 `wrangler.toml`; Cloudflare provisions and renews TLS for the custom domain.
 
-Immediately after deployment, verify:
+Immediately after deployment, verify — a 200 alone is not enough, since the
+Worker returns `200` with `{"status":"error"}` on a D1 failure:
 
 ```sh
-curl --fail --silent --show-error https://nem.27b.io/health
-curl --fail --silent --show-error "https://nem.27b.io/api/v2/values/aggregate?group_by=fuel&hours=1"
+curl --fail --silent --show-error https://nem.27b.io/health | \
+  jq -e '.status == "ok" and .generators > 0'
+curl --fail --silent --show-error "https://nem.27b.io/api/v2/values/aggregate?group_by=fuel&hours=1" | \
+  jq -e '.timestamps != null and .series != null and (.series | length) > 0'
 ```
 
 If production misbehaves, remove the `routes` entry, deploy that change from
@@ -44,7 +47,11 @@ the default branch, and confirm `https://nem.27b.io/health` no longer reaches
 the Worker. The staging endpoint remains available throughout, so it is the
 safe verification target while the DNS/route change is rolled back. Restoring
 production is an explicit re-addition of the same route followed by a deploy;
-do not point the domain at the retired 2015 service.
+do not point the domain at the retired 2015 service. Deleting the `routes`
+entry does not remove the zone's Advanced Certificate for `nem.27b.io` —
+Cloudflare leaves it provisioned; remove it from the dashboard/API if you need
+the certificate gone, otherwise expect it to remain as harmless residual
+state.
 
 ## Dashboard (LAB-419)
 
