@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NEM fuel mix — grid-scale generation</title>
+  <meta name="description" content="What is Australia's National Electricity Market running on right now? Live fuel-mix from AEMO dispatch SCADA.">
+  <script>
+    // Theme boot before first paint: explicit choice wins, else OS preference.
+    (() => {
+      const param = new URLSearchParams(location.search).get('theme');
+      const saved = localStorage.getItem('theme');
+      const pick = [param, saved].find((t) => t === 'light' || t === 'dark');
+      document.documentElement.dataset.theme =
+        pick ?? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    })();
+  </script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%23eda100' d='M9 1 3 9h4l-1 6 6-8H8l1-6z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/vendor/uPlot.min.css">
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body class="min-h-screen bg-base-200 text-base-content">
+  <header class="border-b border-base-300 bg-base-100">
+    <div class="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3">
+      <h1 class="text-lg font-bold tracking-tight">
+        NEM <span class="font-normal text-base-content/70">fuel mix</span>
+      </h1>
+      <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">
+        AEMO dispatch SCADA &middot; 5-min
+      </span>
+      <div class="ms-auto">
+        <label class="btn btn-ghost btn-sm swap swap-rotate" aria-label="Toggle dark mode">
+          <input type="checkbox" id="theme-toggle">
+          <span class="swap-off" aria-hidden="true">&#9788;</span>
+          <span class="swap-on" aria-hidden="true">&#9789;</span>
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-6xl space-y-4 p-4">
+    <!-- Filter row: region is the one MVP filter (LAB-419 AC). -->
+    <nav class="flex flex-wrap items-center gap-3" aria-label="Region filter">
+      <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Region</span>
+      <div class="join" id="region-filter" role="group"></div>
+    </nav>
+
+    <section class="card chart-surface rounded-lg border border-base-300 shadow-sm">
+      <div class="card-body gap-4 p-4 sm:p-6">
+        <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <div>
+            <p class="text-[0.65rem] uppercase tracking-widest text-base-content/50">
+              Grid-scale generation, net
+            </p>
+            <p class="text-4xl font-semibold sm:text-5xl" id="hero-total" aria-live="polite">&mdash;</p>
+          </div>
+          <p class="text-sm text-base-content/60" id="hero-asat"></p>
+          <span class="badge badge-warning badge-sm hidden" id="truncated-badge"
+                title="The API row limit cut this window short — totals may be incomplete.">
+            window truncated
+          </span>
+        </div>
+
+        <div class="alert alert-error hidden text-sm" id="error-alert" role="alert">
+          <span id="error-text"></span>
+          <button class="btn btn-ghost btn-xs" id="error-retry">Retry</button>
+        </div>
+
+        <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_13rem]">
+          <div id="chart" class="min-w-0" aria-label="Fuel mix stacked area chart, time axis in AEST"></div>
+          <aside aria-label="Fuel readout">
+            <p class="mb-2 text-[0.65rem] uppercase tracking-widest text-base-content/50" id="readout-time"></p>
+            <div class="space-y-1 text-sm" id="readout"></div>
+          </aside>
+        </div>
+
+        <p class="text-xs text-base-content/60">
+          Grid-scale generation only &mdash; excludes rooftop solar, so this is neither demand
+          nor total supply. Values are net MW: storage draws below zero while charging.
+          Times are AEST (NEM market time, UTC+10, no DST); each point is the 5-minute
+          interval ending at that time.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="mx-auto max-w-6xl px-4 pb-6 text-xs text-base-content/50">
+    Data &copy; AEMO, via NEMWEB &middot;
+    <a class="link" href="https://github.com/27b-io/nem.api/blob/master/worker/API.md">API contract</a> &middot;
+    <a class="link" href="/api/v2/values/aggregate?group_by=fuel">raw JSON</a>
+  </footer>
+
+  <script src="/vendor/uPlot.iife.min.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
