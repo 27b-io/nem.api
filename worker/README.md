@@ -33,7 +33,10 @@ default branch attaches `nem.27b.io` through the `routes` entry in
 `wrangler.toml`; Cloudflare provisions and renews TLS for the custom domain.
 
 Immediately after deployment, verify — a 200 alone is not enough, since the
-Worker returns `200` with `{"status":"error"}` on a D1 failure:
+Worker can return `200` with `{"status":"ok", "generators": 0}` if the D1
+table is empty or the count query silently returns zero rows (D1 failures
+return HTTP 500 with `{"status":"error"}`, which `curl --fail` already
+catches):
 
 ```sh
 curl --fail --silent --show-error https://nem.27b.io/health | \
