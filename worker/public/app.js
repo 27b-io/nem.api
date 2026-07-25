@@ -147,9 +147,14 @@ function renderHero() {
   }
   const last = n - 1;
   let total = 0;
-  for (const fuel of ordered) total += fuel.values[last] ?? 0;
+  let sawValue = false;
+  for (const fuel of ordered) {
+    const v = fuel.values[last];
+    if (v != null) { total += v; sawValue = true; }
+  }
   const ts = payload.timestamps[last] * 1e3;
-  $('hero-total').textContent = `${fmtMW.format(total)} MW`;
+  // An all-null latest bucket (ingest lag) is "no reading", not 0 MW.
+  $('hero-total').textContent = sawValue ? `${fmtMW.format(total)} MW` : '—';
   $('hero-asat').textContent = `as at ${fmtTime.format(ts)} AEST · ${fmtDate.format(ts)}`;
 }
 
@@ -166,7 +171,12 @@ function showError(message) {
   $('error-alert').classList.remove('hidden');
 }
 
+// Monotonic token so a slow, stale region response can never overwrite the
+// latest selection (or clear a newer request's busy state).
+let activeLoad = 0;
+
 async function load(region) {
+  const loadId = ++activeLoad;
   const url = '/api/v2/values/aggregate?group_by=fuel'
     + (region ? `&region=${encodeURIComponent(region)}` : '');
   chartEl.classList.add('opacity-50'); // refetch keeps the previous frame
@@ -178,16 +188,21 @@ async function load(region) {
       try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }
       throw new Error(detail);
     }
-    state.payload = await res.json();
+    const payload = await res.json();
+    if (loadId !== activeLoad) return;
+    state.payload = payload;
     state.region = region;
     $('error-alert').classList.add('hidden');
     render();
   } catch (err) {
+    if (loadId !== activeLoad) return;
     console.error('fuel-mix load failed:', err);
     showError(err instanceof Error ? err.message : String(err));
   } finally {
-    chartEl.classList.remove('opacity-50');
-    chartEl.removeAttribute('aria-busy');
+    if (loadId === activeLoad) {
+      chartEl.classList.remove('opacity-50');
+      chartEl.removeAttribute('aria-busy');
+    }
   }
 }
 
@@ -212,6 +227,10 @@ function renderRegionFilter() {
 // Theme toggle: explicit choice persists; OS changes apply only while the
 // user hasn't chosen. Chart colours are canvas-baked, so re-render on switch.
 function initTheme() {
+  // A valid ?theme= is an explicit choice (it wins at boot) — the OS-change
+  // listener must respect it just like a saved toggle.
+  const queryTheme = new URLSearchParams(location.search).get('theme');
+  const queryExplicit = queryTheme === 'light' || queryTheme === 'dark';
   const toggle = $('theme-toggle');
   toggle.checked = currentTheme() === 'dark';
   toggle.addEventListener('change', () => {
@@ -222,7 +241,7 @@ function initTheme() {
     renderReadout(null);
   });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-    if (localStorage.getItem('theme')) return;
+    if (queryExplicit || localStorage.getItem('theme')) return;
     document.documentElement.dataset.theme = e.matches ? 'dark' : 'light';
     toggle.checked = e.matches;
     renderChart();
