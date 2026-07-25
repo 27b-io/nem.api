@@ -1,0 +1,34 @@
+/* Tailwind v4 + daisyUI 5 input — build with `npm run build:css`.
+   Output (public/assets/styles.css) is committed, like the generated seed
+   migration, so deploy stays a plain `wrangler deploy`. */
+@import "tailwindcss" source(none);
+@source "./public";
+
+@plugin "daisyui" {
+  themes: light --default, dark --prefersdark;
+}
+
+/* Chart surface + chrome tokens, pinned to the exact hexes the fuel palette
+   was validated against (dataviz six-checks validator; see app.js). The card
+   backgrounds use these literals rather than daisyUI base-100 so a future
+   daisyUI theme tweak can't silently invalidate the palette's contrast run. */
+:root,
+[data-theme="light"] {
+  --chart-surface: #ffffff;
+  --chart-grid: #e1e0d9;
+  --chart-axis-ink: #898781;
+}
+[data-theme="dark"] {
+  --chart-surface: #1d232a;
+  --chart-grid: #2c2c2a;
+  --chart-axis-ink: #898781;
+}
+
+.chart-surface {
+  background-color: var(--chart-surface);
+}
+
+/* uPlot chrome: recessive hairline grid, muted axis ink (dataviz mark specs). */
+.u-legend {
+  display: none; /* custom readout panel replaces the built-in legend */
+}

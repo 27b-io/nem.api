@@ -3,9 +3,8 @@
 Cloudflare Worker for the modernized NEM dispatch SCADA API. Stage 1 (LAB-416):
 project scaffold, D1 schema, R2 archive bucket, and the generator reference data
 seeded from the repo registration CSV. Stage 2 (LAB-417): the 5-minute Cron
-ingest of CURRENT Dispatch SCADA. Stage 3 (LAB-418): the v2 query API.
-Stage 4 (LAB-420): the ARCHIVE daily backfill (~13 months of history). The
-frontend lands in a later stage.
+ingest of CURRENT Dispatch SCADA. Stage 3 (LAB-418): the v2 query API;
+(LAB-419): the fuel-mix dashboard, served from this same Worker.
 
 ## Query API (v2) — public
 
@@ -24,6 +23,37 @@ environment). Production domain will be **nem.27b.io** — attached at DNS
 cutover (LAB-422) via a `routes = [{ pattern = "nem.27b.io", custom_domain = true }]`
 entry in `wrangler.toml`; the 27b.io zone must live on the same Cloudflare
 account as the Worker.
+
+## Dashboard (LAB-419)
+
+`public/` is served via the Workers **assets** binding on the same Worker/zone
+as the API (`wrangler.toml [assets]`) — no separate Pages project, no CORS.
+Requests matching a file under `public/` are served as static assets;
+everything else falls through to the fetch handler. The hero view is the
+OpenNEM-style fuel-mix stacked area over `/api/v2/values/aggregate?group_by=fuel`
+with a region filter (five NEM regions, NEM-wide default), light/dark via
+daisyUI `data-theme`.
+
+- **Chart**: uPlot 1.6.32, pinned in `package.json` and vendored into
+  `public/vendor/` (no CDN at runtime). Stacking is diverging — values are
+  net MW per the contract, so each fuel splits into positive/negative halves
+  (batteries dip below zero while charging); the pure transform lives in
+  `public/stacking.js` and is unit-tested by `test/stacking.spec.ts`.
+- **Fuel palette**: OpenNEM-style hue families re-stepped to pass CVD /
+  contrast / lightness gates in both themes (dataviz six-checks validator)
+  against the exact surfaces in `tailwind.css`. Stack order is part of the
+  accessibility mechanism — don't reorder or hand-edit hexes without
+  re-validating. Battery has a reserved violet slot for when the LAB-421
+  registration refresh makes battery DUIDs resolvable; unknown fuel keys fold
+  to gray, never dropped.
+- **CSS**: Tailwind v4 + daisyUI 5, one build step
+  (`npm run build:css`, input `tailwind.css`). The output
+  `public/assets/styles.css` is **generated and committed** — same convention
+  as the seed migration — so deploy stays a plain `wrangler deploy`. Rebuild
+  and commit whenever `index.html`/`app.js` classes change.
+- **Time**: axis and "as at" stamps are NEM market time (AEST, UTC+10, no
+  DST) via `Australia/Brisbane` — never `Australia/Sydney`. Buckets are
+  period-ending.
 
 ## Bindings
 

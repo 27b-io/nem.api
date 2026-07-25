@@ -6,6 +6,16 @@ compatibility_date = "2026-07-01"
 # Pinned so CI deploys need only CLOUDFLARE_API_TOKEN (no account lookup).
 account_id = "a3ff5761a3414bbf10e94ef31ea6aa07"
 
+# Dashboard static assets (LAB-419), served from this same Worker/zone — no
+# separate Pages project, no CORS hop. Requests matching a file under public/
+# are served as assets; everything else (including /api/v2/*) falls through to
+# the fetch handler. public/assets/styles.css is BUILT (npm run build:css) and
+# committed, same convention as the generated seed migration — the deploy
+# pipeline stays a plain `wrangler deploy`.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "nem-api-db"
