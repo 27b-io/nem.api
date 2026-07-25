@@ -3,15 +3,58 @@
 Cloudflare Worker for the modernized NEM dispatch SCADA API. Stage 1 (LAB-416):
 project scaffold, D1 schema, R2 archive bucket, and the generator reference data
 seeded from the repo registration CSV. Stage 2 (LAB-417): the 5-minute Cron
-ingest of CURRENT Dispatch SCADA. Stage 4 (LAB-421): the weekly out-of-band
-generator-registration refresh from AEMO's live workbook. Query endpoints and
-the frontend land in other stages.
+ingest of CURRENT Dispatch SCADA. Stage 3 (LAB-418): the v2 query API;
+(LAB-419): the fuel-mix dashboard, served from this same Worker. Stage 4 (LAB-421):
+the weekly out-of-band generator-registration refresh from AEMO's live workbook.
+
+## Query API (v2) — public
+
+`src/api.ts` — `GET /api/v2/values`, `GET /api/v2/values/aggregate?group_by=fuel|tech|region`,
+and `GET /api/v2/generators`, serving from D1. A **greenfields public
+contract** (public until abuse is detected — ray, 2026-07-24; the legacy 2015
+API is reference-only): columnar lib-agnostic payload, period-ending NEM-time
+buckets (AEST, daily buckets end at AEST midnight), net-MW aggregate
+convention, all user input bound (never interpolated), and allowlisted
+sort/group_by/resolution identifiers. The pinned request/response contract
+lives in [`API.md`](./API.md) — it is owned jointly with the LAB-419
+frontend; change both together.
 
 Dev deployment: https://nem-api.raywalker.workers.dev (workers.dev is the dev
 environment). Production domain will be **nem.27b.io** — attached at DNS
 cutover (LAB-422) via a `routes = [{ pattern = "nem.27b.io", custom_domain = true }]`
 entry in `wrangler.toml`; the 27b.io zone must live on the same Cloudflare
 account as the Worker.
+
+## Dashboard (LAB-419)
+
+`public/` is served via the Workers **assets** binding on the same Worker/zone
+as the API (`wrangler.toml [assets]`) — no separate Pages project, no CORS.
+Requests matching a file under `public/` are served as static assets;
+everything else falls through to the fetch handler. The hero view is the
+OpenNEM-style fuel-mix stacked area over `/api/v2/values/aggregate?group_by=fuel`
+with a region filter (five NEM regions, NEM-wide default), light/dark via
+daisyUI `data-theme`.
+
+- **Chart**: uPlot 1.6.32, pinned in `package.json` and vendored into
+  `public/vendor/` (no CDN at runtime). Stacking is diverging — values are
+  net MW per the contract, so each fuel splits into positive/negative halves
+  (batteries dip below zero while charging); the pure transform lives in
+  `public/stacking.js` and is unit-tested by `test/stacking.spec.ts`.
+- **Fuel palette**: OpenNEM-style hue families re-stepped to pass CVD /
+  contrast / lightness gates in both themes (dataviz six-checks validator)
+  against the exact surfaces in `tailwind.css`. Stack order is part of the
+  accessibility mechanism — don't reorder or hand-edit hexes without
+  re-validating. Battery has a reserved violet slot for when the LAB-421
+  registration refresh makes battery DUIDs resolvable; unknown fuel keys fold
+  to gray, never dropped.
+- **CSS**: Tailwind v4 + daisyUI 5, one build step
+  (`npm run build:css`, input `tailwind.css`). The output
+  `public/assets/styles.css` is **generated and committed** — same convention
+  as the seed migration — so deploy stays a plain `wrangler deploy`. Rebuild
+  and commit whenever `index.html`/`app.js` classes change.
+- **Time**: axis and "as at" stamps are NEM market time (AEST, UTC+10, no
+  DST) via `Australia/Brisbane` — never `Australia/Sydney`. Buckets are
+  period-ending.
 
 ## Bindings
 
@@ -69,8 +112,8 @@ If cron intervals are missed (deploy freeze, outage), the next run catches up
 automatically: discovery diffs the whole CURRENT listing (~2 days of files)
 against the ledger. Catch-up is bounded to 50 files per run
 (`MAX_FILES_PER_RUN`) — a cold start over the full listing drains in about an
-hour of 5-minute runs. Gaps longer than CURRENT's ~2-day window need the
-ARCHIVE backfill (LAB-420).
+hour of 5-minute runs. Gaps longer than CURRENT's ~2-day window heal via the
+ARCHIVE backfill cron (below) as soon as the affected daily zips are published.
 
 Failure handling: one bad file logs and the run continues (per-file
 isolation). NEMWEB's WAF rate-limits aggressive clients with 403s, so after 5
@@ -127,6 +170,65 @@ npm run refresh:local      # apply to local D1 (or refresh:remote for prod)
 
 Note: GitHub auto-disables scheduled workflows after ~60 days without repo
 activity; a manual dispatch re-enables the schedule.
+
+## ARCHIVE backfill (Cron, every 15 minutes)
+
+`src/backfill.ts` (LAB-420), on its own cron schedule (`11,26,41,56 * * * *` —
+the string in `wrangler.toml` must stay byte-identical to `BACKFILL_CRON`,
+which `src/index.ts` dispatches on). NEMWEB's ARCHIVE
+(`https://nemweb.com.au/Reports/ARCHIVE/Dispatch_SCADA/`) holds a rolling
+~13 months of daily zips, each a zip-of-zips wrapping that day's 288
+five-minute files. Per run the backfill diffs the ARCHIVE listing against the
+`scrape` ledger (daily filenames — `PUBLIC_DISPATCHSCADA_<YYYYMMDD>.zip` —
+share the ledger with the five-minute files; a GLOB keeps them apart) and
+ingests up to 4 pending days, oldest first: nested unzip (`fflate`), the same
+parse/map path as the CURRENT ingest, idempotent chunked upserts, raw daily
+zip archived to R2 at `archive/<filename>`, ledger write last.
+
+From an empty ledger the full archive (~375 days, ~61k values/day at current
+DUID coverage) drains in roughly a day of wall time, then each run idles for
+the cost of a listing fetch and one ledger query, picking up new daily zips as
+ARCHIVE publishes them — the backfill doubles as a standing gap healer for
+outages longer than CURRENT's ~2-day window. Days already covered by the
+CURRENT ingest overlap harmlessly (same upsert key). Retries read the raw zip
+back from R2 instead of re-downloading (the object is only written after a
+full successful parse, so it is always valid). Inner five-minute entries that
+fail to parse are logged and skipped — the archive is immutable, so a defect
+there would otherwise retry forever — while whole-day failures (fetch errors,
+zero parsed rows) leave the day unledgered for retry, with the same
+consecutive-failure abort as the CURRENT ingest to respect NEMWEB's WAF.
+
+Each ingested day logs a sanity line (`288 file(s), 288 interval(s), N
+value(s)`) and a `GAPS:` warning on any deviation. To check progress or
+completion against the deployed database:
+
+```sh
+# pending == 0 in the run logs means drained; per-day interval coverage:
+npx wrangler d1 execute nem-api-db --remote --command "
+  SELECT date(scrape_time,'unixepoch','+10 hours') AS day,
+         count(DISTINCT scrape_time) AS intervals
+  FROM scada_values GROUP BY day HAVING intervals < 288 ORDER BY day"
+npx wrangler d1 info nem-api-db   # database size vs the 10GB cap
+```
+
+Boundary note for that query: a daily zip covers settlement times 00:05
+through 24:00, so each calendar day's midnight interval comes from the
+*previous* day's zip — the oldest backfilled day reports 287 and the day after
+the newest reports 1. Those two rows are the settlement-date convention, not
+gaps. Sizing, measured locally at 19.4 bytes/row: the current window ingests
+~23M rows ≈ ~450MB; once the LAB-421 registration refresh makes all ~510
+DUIDs resolvable, a full window is ~55M rows ≈ ~1.1GB — inside D1's 10GB cap.
+
+**Re-ingesting after a registration refresh (LAB-421):** values for DUIDs
+missing from `generators` are dropped (logged per run), but the raw daily zips
+survive in R2. Once the refresh lands, clear the daily ledger entries and the
+cron re-ingests every day from R2 (no NEMWEB re-download), filling in the
+previously unknown DUIDs — existing rows upsert to the same values:
+
+```sh
+npx wrangler d1 execute nem-api-db --remote --command \
+  "DELETE FROM scrape WHERE filename GLOB 'PUBLIC_DISPATCHSCADA_????????.zip'"
+```
 
 ## Migrations
 

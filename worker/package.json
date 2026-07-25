@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "build:css": "tailwindcss -i tailwind.css -o public/assets/styles.css --minify",
     "deploy": "wrangler deploy",
     "check": "tsc --noEmit && tsc --noEmit -p test",
     "test": "vitest run",
@@ -20,11 +21,15 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.18.7",
     "@cloudflare/workers-types": "^5.20260721.1",
+    "@tailwindcss/cli": "^4.3.3",
+    "daisyui": "^5.7.0",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.8.3",
     "vitest": "^4.1.10",
     "wrangler": "^4.113.0"
   },
   "dependencies": {
-    "fflate": "^0.8.3"
+    "fflate": "^0.8.3",
+    "uplot": "1.6.32"
   }
 }

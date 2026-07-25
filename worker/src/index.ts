@@ -1,3 +1,5 @@
+import { handleApi } from './api';
+import { BACKFILL_CRON, runBackfill } from './backfill';
 import { runIngest } from './ingest';
 
 export interface Env {
@@ -8,6 +10,11 @@ export interface Env {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const { pathname } = new URL(request.url);
+
+    // Query API (LAB-418): /api/v2/values, /api/v2/values/aggregate, /api/v2/generators.
+    if (pathname === '/api/v2' || pathname.startsWith('/api/v2/')) {
+      return handleApi(request, env);
+    }
 
     if (pathname === '/health') {
       try {
@@ -23,12 +30,19 @@ export default {
     return new Response('Not found', { status: 404 });
   },
 
-  // Cron ("*/5 * * * *" in wrangler.toml): ingest new CURRENT Dispatch SCADA
-  // files. Per-file errors are isolated inside runIngest; a throw here (e.g.
+  // Two cron schedules share this handler (wrangler.toml), dispatched on the
+  // exact cron string: the offset schedule runs the ARCHIVE backfill, anything
+  // else the 5-minute CURRENT ingest — so a drifted backfill expression
+  // degrades to extra idempotent ingest runs, never a silent no-op handler.
+  // Per-file/day errors are isolated inside each runner; a throw here (e.g.
   // the listing fetch itself failing) marks the cron invocation failed in the
   // dashboard, which is exactly the visibility we want — the next run catches
   // up regardless.
-  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+  async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    if (controller.cron === BACKFILL_CRON) {
+      await runBackfill(env);
+      return;
+    }
     await runIngest(env);
   },
 } satisfies ExportedHandler<Env>;
