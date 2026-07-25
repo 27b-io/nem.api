@@ -1,2 +1,4 @@
 node_modules/
 .wrangler/
+# transient output of scripts/refresh-generators.mjs (LAB-421)
+refresh-upsert.sql

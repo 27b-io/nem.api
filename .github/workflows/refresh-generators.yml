@@ -1,0 +1,52 @@
+# Out-of-band generator-registration refresh (LAB-421): keeps the D1
+# `generators` table current with AEMO's live registration workbook without
+# touching the 5-minute SCADA hot path. Weekly is generous — units register
+# roughly monthly — and the job is a no-op when nothing changed (pure upserts).
+#
+# Fail-safe: the generate step aborts on any anomaly (fetch failure, renamed
+# sheet/columns, truncated list) before SQL exists, and the SQL itself never
+# deletes — a failing run can only leave the existing reference data intact.
+# The apply step is idempotent, so re-running after a partial failure is safe.
+#
+# Manual refresh: Actions -> "Refresh generators" -> Run workflow
+# (or `gh workflow run refresh-generators.yml`).
+#
+# NOTE: GitHub auto-disables scheduled workflows after ~60 days without repo
+# activity; a manual dispatch re-enables it.
+name: Refresh generators
+
+on:
+  schedule:
+    - cron: '43 19 * * 1' # Mon 19:43 UTC = Tue ~05:43 AEST, off-peak both sides
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-generators
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # npm ci runs third-party lifecycle scripts after this; don't leave the token in .git/config.
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+      - name: Fetch + map AEMO workbook to upsert SQL
+        run: npm run refresh:generate
+      - name: Apply upserts to D1
+        run: npm run refresh:remote
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
