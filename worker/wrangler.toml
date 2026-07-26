@@ -6,6 +6,10 @@ compatibility_date = "2026-07-01"
 # Pinned so CI deploys need only CLOUDFLARE_API_TOKEN (no account lookup).
 account_id = "a3ff5761a3414bbf10e94ef31ea6aa07"
 
+# LAB-422 production custom domain. The Worker remains available at its
+# workers.dev URL as the pre-cutover staging endpoint.
+routes = [{ pattern = "nem.27b.io", custom_domain = true }]
+
 # Dashboard static assets (LAB-419), served from this same Worker/zone — no
 # separate Pages project, no CORS hop. Requests matching a file under public/
 # are served as assets; everything else (including /api/v2/*) falls through to
