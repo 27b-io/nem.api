@@ -2,5 +2,16 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>27b-io/renovate-config"
+  ],
+  "description": "ignorePaths replaces (not merges) the preset value, so the :ignoreModulesAndTests defaults are restated before the repo-specific entry. Root package.json is the legacy 2015 app (reference only, never installed); the live Worker manifest is worker/package.json. ignorePaths, not packageRules.enabled=false, because vulnerabilityAlerts overlay packageRules and would keep raising security PRs.",
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
+    "**/examples/**",
+    "**/__tests__/**",
+    "**/tests/**",
+    "**/__fixtures__/**",
+    "package.json"
   ]
 }
