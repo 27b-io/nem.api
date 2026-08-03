@@ -43,6 +43,27 @@ silently coerced.
   midnight. Sub-daily buckets are unaffected by the offset (10 h is a whole
   multiple of 5/30/60 min).
 
+## Caching (LAB-768)
+
+Responses are served through a caching layer — cachekit
+(`@cachekit-io/cachekit/workers`, Cache API backend: per-colo,
+point-of-presence). What a consumer sees:
+
+- `x-cache: HIT | MISS` on every cacheable response, plus
+  `cache-control: public, max-age=<seconds>` reflecting the **remaining**
+  entry lifetime and `x-cache-expires` (unix seconds) for when it lapses.
+- **Freshness**: any window that can still gain samples (touches the current
+  dispatch interval, open-ended, or relative) is cached only to the current
+  5-minute dispatch boundary — never past it — so worst-case staleness is
+  one interval. Fully-past windows are immutable and cache for 24 h
+  (bounded so late ARCHIVE backfills still surface). `generators` caches
+  for 1 h (registration data refreshes out-of-band, roughly weekly).
+- **Keys are canonical**: an alias and its canonical param, or ISO and unix
+  forms of the same time, share one cache entry; unrecognised params are
+  ignored. Relative windows (`hours=24`, the 24 h default) are cached
+  per-interval — their echoed `start`/`end` may lag up to one interval.
+- Errors are never cached.
+
 ## `GET /api/v2/values`
 
 Per-generator MW, pivoted onto a shared time axis. This is the drill-down

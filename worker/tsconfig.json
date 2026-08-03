@@ -6,6 +6,10 @@
     "strict": true,
     "noEmit": true,
     "types": ["@cloudflare/workers-types"],
+    // cachekit's shared type surface imports ioredis's Node-typed .d.ts
+    // (upstream bug, reported); node_modules declarations are not ours to
+    // typecheck — same rationale as test/tsconfig.json.
+    "skipLibCheck": true,
     "lib": ["ES2022"]
   },
   "include": ["src/**/*.ts"]

@@ -29,6 +29,7 @@
     "wrangler": "^4.113.0"
   },
   "dependencies": {
+    "@cachekit-io/cachekit": "^0.1.5",
     "fflate": "^0.8.3",
     "uplot": "1.6.32"
   }

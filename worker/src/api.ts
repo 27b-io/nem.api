@@ -26,11 +26,16 @@ const RESOLUTIONS = [300, 1800, 3600, 86400];
 // (to AEST midnight) — sub-daily buckets are unaffected by it.
 const NEM_UTC_OFFSET_SECONDS = 36000;
 
-const CORS_HEADERS = {
+export const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, OPTIONS',
   'access-control-allow-headers': 'content-type',
 };
+
+// Parsing/resolution helpers below are exported for src/cache.ts: the cache
+// key builder reuses the exact functions the handlers use, so key semantics
+// cannot drift from query semantics (canonical param + alias, precedence,
+// defaults all stay single-sourced here).
 
 class ApiError extends Error {
   constructor(
@@ -50,7 +55,7 @@ function jsonError(status: number, message: string): Response {
 }
 
 /** First non-empty value among alias names; alias order encodes legacy precedence. */
-function firstParam(params: URLSearchParams, aliases: string[]): string | undefined {
+export function firstParam(params: URLSearchParams, aliases: string[]): string | undefined {
   for (const name of aliases) {
     const value = params.get(name);
     if (value !== null && value !== '') return value;
@@ -61,7 +66,7 @@ function firstParam(params: URLSearchParams, aliases: string[]): string | undefi
 // ---------------------------------------------------------------------------
 // Time grammar (port of queryParser.time)
 
-interface TimeWindow {
+export interface TimeWindow {
   start?: number;
   end?: number;
   exact?: number;
@@ -96,7 +101,7 @@ function addCalendarMonths(unixSeconds: number, months: number): number {
 }
 
 // Legacy else-if precedence: minutes > hours > days > weeks > months.
-const RELATIVE_WINDOWS: Array<[name: string, secondsPerUnit: number | 'months']> = [
+export const RELATIVE_WINDOWS: Array<[name: string, secondsPerUnit: number | 'months']> = [
   ['minutes', 60],
   ['hours', 3600],
   ['days', 86400],
@@ -110,7 +115,7 @@ const RELATIVE_WINDOWS: Array<[name: string, secondsPerUnit: number | 'months']>
  * (a given end is ignored, as legacy did); with only an end, [end-window, end].
  * Without a window, `time` (exact) / `time_start` / `time_end` apply directly.
  */
-function resolveTimeWindow(params: URLSearchParams, nowSeconds: number): TimeWindow {
+export function resolveTimeWindow(params: URLSearchParams, nowSeconds: number): TimeWindow {
   const rawStart = firstParam(params, ['time_start']);
   const rawEnd = firstParam(params, ['time_end']);
   const start = rawStart === undefined ? undefined : parseTimeParam('time_start', rawStart);
@@ -143,7 +148,7 @@ function resolveTimeWindow(params: URLSearchParams, nowSeconds: number): TimeWin
  * otherwise auto-picked from the window span so wide windows don't ship
  * 5-min-resolution payloads.
  */
-function resolveResolution(params: URLSearchParams, window: TimeWindow, nowSeconds: number): number {
+export function resolveResolution(params: URLSearchParams, window: TimeWindow, nowSeconds: number): number {
   const raw = firstParam(params, ['resolution']);
   if (raw !== undefined) {
     const n = Number(raw);
@@ -172,7 +177,7 @@ interface SqlFragment {
 // name, or `state` for region). First non-empty wins — canonical over alias.
 // `region` is the canonical NEM dimension (QLD1/NSW1/VIC1/SA1/TAS1), stored
 // in the `state` column.
-const GENERATOR_FILTERS: Array<{ column: string; aliases: string[] }> = [
+export const GENERATOR_FILTERS: Array<{ column: string; aliases: string[] }> = [
   { column: 'state', aliases: ['region', 'state'] },
   { column: 'fuel_type', aliases: ['fuel', 'fuel_type'] },
   { column: 'fuel_description', aliases: ['fuel_desc', 'fuel_description'] },
@@ -210,7 +215,7 @@ function generatorFilters(params: URLSearchParams, columnPrefix = ''): SqlFragme
 // limit / offset / sort
 
 /** Plain integer clamp: 1..300000, default = the cap. Garbage is a 400, not a silent fallback. */
-function resolveLimit(params: URLSearchParams): { limit: number; offset: number } {
+export function resolveLimit(params: URLSearchParams): { limit: number; offset: number } {
   const rawLimit = firstParam(params, ['limit']);
   let limit = MAX_LIMIT;
   if (rawLimit !== undefined) {
@@ -243,7 +248,7 @@ function bucketExpr(column: string, resolution: number): string {
   return `((${column} + ${NEM_UTC_OFFSET_SECONDS + resolution - 1}) / ${resolution}) * ${resolution} - ${NEM_UTC_OFFSET_SECONDS}`;
 }
 
-function resolveOrder(params: URLSearchParams): string {
+export function resolveOrder(params: URLSearchParams): string {
   const raw = firstParam(params, ['sort', 'order']);
   if (raw === undefined) return 'ORDER BY bucket ASC, gid ASC';
   const [field, dirRaw] = raw.split(',');

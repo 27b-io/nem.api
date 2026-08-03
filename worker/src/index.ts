@@ -1,5 +1,5 @@
-import { handleApi } from './api';
 import { BACKFILL_CRON, runBackfill } from './backfill';
+import { handleApiCached } from './cache';
 import { runIngest } from './ingest';
 
 export interface Env {
@@ -11,9 +11,10 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const { pathname } = new URL(request.url);
 
-    // Query API (LAB-418): /api/v2/values, /api/v2/values/aggregate, /api/v2/generators.
+    // Query API (LAB-418): /api/v2/values, /api/v2/values/aggregate,
+    // /api/v2/generators — cache-fronted (LAB-768, see src/cache.ts).
     if (pathname === '/api/v2' || pathname.startsWith('/api/v2/')) {
-      return handleApi(request, env);
+      return handleApiCached(request, env);
     }
 
     if (pathname === '/health') {
