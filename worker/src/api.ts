@@ -26,7 +26,7 @@ const RESOLUTIONS = [300, 1800, 3600, 86400];
 // (to AEST midnight) — sub-daily buckets are unaffected by it.
 const NEM_UTC_OFFSET_SECONDS = 36000;
 
-const CORS_HEADERS = {
+export const CORS_HEADERS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, OPTIONS',
   'access-control-allow-headers': 'content-type',

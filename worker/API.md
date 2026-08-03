@@ -45,9 +45,9 @@ silently coerced.
 
 ## Caching (LAB-768)
 
-Responses are served through a caching layer (per-colo, Workers Cache API;
-the store migrates to cachekit — the point of LAB-768 — once an installable
-Workers release exists, without contract changes). What a consumer sees:
+Responses are served through a caching layer — cachekit
+(`@cachekit-io/cachekit/workers`, Cache API backend: per-colo,
+point-of-presence). What a consumer sees:
 
 - `x-cache: HIT | MISS` on every cacheable response, plus
   `cache-control: public, max-age=<seconds>` reflecting the **remaining**

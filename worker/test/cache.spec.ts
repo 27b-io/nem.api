@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   boundaryTtl,
   buildCacheEntry,
+  cacheInstance,
   CLOSED_WINDOW_TTL_SECONDS,
   GENERATORS_TTL_SECONDS,
   INGEST_GRACE_SECONDS,
@@ -185,5 +186,15 @@ describe('handleApiCached — integration', () => {
     const hit = await get('/api/v2/generators');
     expect(hit.headers.get('x-cache')).toBe('HIT');
     expect(hit.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('round-trips multi-MB bodies (default 300000-row responses far exceed cachekit’s 1 MiB encode default)', async () => {
+    // Exercises the REAL configured instance: on cachekit defaults this set
+    // throws ValueTooLargeError and the heaviest queries silently never cache.
+    const key = `test:big:${host}`;
+    const body = 'x'.repeat(2 * 1024 * 1024);
+    await cacheInstance().set(key, { body, expires: 1 }, { ttl: 60 });
+    const hit = await cacheInstance().get<{ body: string; expires: number }>(key);
+    expect(hit?.body.length).toBe(body.length);
   });
 });

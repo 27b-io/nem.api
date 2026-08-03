@@ -1,21 +1,15 @@
 // Caching layer for the public /api/v2 (LAB-768): canonical cache keys +
-// dispatch-interval-aligned TTLs over the Workers Cache API. This is the
-// public API's first line of defence against hot-loop consumers, and the D1
-// load shed for everything else.
+// dispatch-interval-aligned TTLs, stored through cachekit (the point of the
+// ticket is dogfooding it as a real production consumer). This is the public
+// API's first line of defence against hot-loop consumers, and the D1 load
+// shed for everything else.
 //
-// WHY the store is caches.default and not cachekit (the LAB-768 goal is
-// dogfooding cachekit): as of 2026-07-26 no installable cachekit release can
-// run here. @cachekit-io/cachekit@0.1.4 — the first version with a Workers
-// entrypoint — hard-depends on @cachekit-io/cachekit-core-wasm@0.1.1, which
-// was never published to npm (E404), and dist/workers/runtime.js imports it
-// unconditionally, so the bundle cannot build. 0.1.3 has no Workers entry at
-// all, and the Cache-API/KV backends (cachekit-ts#81) are merged upstream but
-// unreleased. The POLICY below (key canonicalisation + TTLs — the actual
-// engineering) is store-agnostic; the store itself is isolated in
-// cacheFetch/cachePut and deliberately mirrors cachekit's own CacheAPIBackend
-// scheme (synthetic never-fetched URLs under an RFC 2606 .invalid host,
-// Cache-Control max-age), so the cachekit swap is a mechanical change to
-// those two functions once a working release ships.
+// Store: `createCache.minimal({ backend: workersCacheAPI() })` — minimal is
+// cachekit's speed-first intent, documented for exactly this workload
+// (read-heavy public APIs); the Cache API backend is a per-colo
+// point-of-presence tier, which is the right shape here because the
+// authoritative copy is D1 itself and every entry is re-derivable. No
+// encryption/compression/SaaS tier on this pass (ticket non-goals).
 //
 // Key properties (also the abuse posture):
 // - Canonical keys: alias params collapse onto their canonical name and time
@@ -34,8 +28,10 @@
 //   seconds AFTER the boundary — a dashboard polling exactly on the boundary
 //   must not pin a pre-ingest response for the whole interval).
 
+import { createCache, workersCacheAPI, type WorkersCache } from '@cachekit-io/cachekit/workers';
 import type { Env } from './index';
 import {
+  CORS_HEADERS,
   firstParam,
   GENERATOR_FILTERS,
   handleApi,
@@ -60,7 +56,9 @@ export const CLOSED_WINDOW_TTL_SECONDS = 86400;
 // modest TTL is the honest policy for reference data that moves ~weekly.
 export const GENERATORS_TTL_SECONDS = 3600;
 
-// Bump to invalidate every existing entry on a key-format or policy change.
+// Bump to invalidate every existing entry on a key-format, CachedResponse
+// shape, or policy change — get<CachedResponse> is a blind cast, so a shape
+// change without a bump would deserialize stale entries with missing fields.
 const KEY_VERSION = 'k1';
 
 /**
@@ -76,9 +74,58 @@ export function boundaryTtl(nowSeconds: number): number {
 }
 
 interface CacheEntry {
-  /** Synthetic never-fetched URL (RFC 2606 .invalid host) keying caches.default. */
+  /** Canonical cachekit key (the backend maps it to storage injectively). */
   key: string;
   ttl: number;
+}
+
+// One cache per isolate, per the SDK's own guidance — per-request creation
+// leaks wasm allocations on hot isolates. Lazy so module init stays
+// side-effect-free. Exported for tests (they must exercise THIS configured
+// instance — the options below are load-bearing policy, see each line).
+let cache: WorkersCache | null = null;
+
+export function cacheInstance(): WorkersCache {
+  cache ??= createCache.minimal({
+    backend: workersCacheAPI(),
+    // Ticket non-goal, and the values are served-as-is JSON — skip the wasm
+    // ByteStorage envelope (cachekit defaults compression ON).
+    compression: false,
+    // cachekit's L1 would repopulate on an L2 hit with ITS default TTL
+    // (cache-core get(): ttlSeconds ?? defaultTtl), not the entry's remaining
+    // lifetime — an isolate could serve a boundary-TTL entry past the
+    // dispatch boundary. The Cache API backend is already colo-local, so L1
+    // buys nothing here but that staleness (plus multi-MB bodies in isolate
+    // memory). Off.
+    l1: { enabled: false },
+    // /api/v2 bodies are multi-MB at the default 300000-row limit; cachekit's
+    // 1 MiB encode default would throw ValueTooLargeError on exactly the
+    // heaviest queries — caught and logged, but silently never cached.
+    // 64 MiB covers realistic maxima; anything larger falls through uncached.
+    serializer: { maxEncodedSize: 64 * 1024 * 1024, maxDecodedSize: 64 * 1024 * 1024 },
+  });
+  return cache;
+}
+
+/** What we cache: the serialized 200 body plus its absolute expiry. */
+interface CachedResponse {
+  body: string;
+  expires: number;
+}
+
+/**
+ * Response headers rebuilt on both paths: the handler's own CORS + JSON
+ * headers, Cache-Control carrying the REMAINING lifetime (so a client
+ * fetching just before the boundary cannot hold a stale response past it),
+ * `x-cache-expires` (unix), and the HIT/MISS dogfooding signal.
+ */
+function responseHeaders(maxAge: number, expires: number, xCache: 'HIT' | 'MISS'): Headers {
+  const headers = new Headers(CORS_HEADERS);
+  headers.set('content-type', 'application/json');
+  headers.set('cache-control', `public, max-age=${maxAge}`);
+  headers.set('x-cache-expires', String(expires));
+  headers.set('x-cache', xCache);
+  return headers;
 }
 
 /** Canonical generator-filter key parts; comma lists sort (IN() is unordered). */
@@ -168,19 +215,14 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
 
   // Host included so multiple public surfaces (workers.dev, nem.27b.io) never
   // share entries; tests rely on this for isolation of the shared test cache.
-  return {
-    key: `https://nem-api-cache.invalid/${KEY_VERSION}/${encodeURIComponent(`${url.host}${route}?${parts.join('&')}`)}`,
-    ttl,
-  };
+  return { key: `${KEY_VERSION}:${url.host}${route}?${parts.join('&')}`, ttl };
 }
 
 /**
- * Cache-fronted /api/v2: GET responses (200 only) are stored in
- * caches.default under the canonical key with `Cache-Control: max-age=<ttl>`
- * (which is also the browser policy — `x-cache-expires` lets hits rewrite
- * max-age down to the REMAINING lifetime so a client fetching just before the
- * boundary cannot hold a stale response past it). `x-cache: HIT|MISS` is the
- * dogfooding observability signal.
+ * Cache-fronted /api/v2: GET 200 bodies are stored through cachekit under
+ * the canonical key with the policy TTL. Cache failures in either direction
+ * are logged and the request proceeds — the cache layer must never be the
+ * reason a public request fails.
  */
 export async function handleApiCached(request: Request, env: Env): Promise<Response> {
   if (request.method !== 'GET') return handleApi(request, env);
@@ -189,28 +231,29 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
   const entry = buildCacheEntry(new URL(request.url), nowSeconds);
   if (entry === null || entry.ttl <= 0) return handleApi(request, env);
 
-  const cached = await caches.default.match(entry.key);
-  if (cached !== undefined) {
-    const headers = new Headers(cached.headers);
-    const expires = Number(headers.get('x-cache-expires'));
-    const remaining = Number.isFinite(expires) ? Math.max(0, expires - nowSeconds) : 0;
-    headers.set('cache-control', `public, max-age=${remaining}`);
-    headers.set('x-cache', 'HIT');
-    return new Response(cached.body, { status: cached.status, headers });
+  let hit: CachedResponse | null = null;
+  try {
+    hit = await cacheInstance().get<CachedResponse>(entry.key);
+  } catch (err) {
+    console.error(`cache get failed (${entry.key}):`, err);
+  }
+  if (hit !== null) {
+    return new Response(hit.body, {
+      status: 200,
+      headers: responseHeaders(Math.max(0, hit.expires - nowSeconds), hit.expires, 'HIT'),
+    });
   }
 
   const response = await handleApi(request, env);
   if (response.status !== 200) return response; // errors are never cached
 
-  const headers = new Headers(response.headers);
-  headers.set('cache-control', `public, max-age=${entry.ttl}`);
-  headers.set('x-cache-expires', String(nowSeconds + entry.ttl));
+  const body = await response.text();
+  const expires = nowSeconds + entry.ttl;
   try {
-    await caches.default.put(entry.key, new Response(response.clone().body, { status: 200, headers }));
+    await cacheInstance().set<CachedResponse>(entry.key, { body, expires }, { ttl: entry.ttl });
   } catch (err) {
-    // A failed put must never fail the request — the data is already in hand.
-    console.error('cache put failed:', err);
+    // A failed set must never fail the request — the data is already in hand.
+    console.error(`cache set failed (${entry.key}):`, err);
   }
-  headers.set('x-cache', 'MISS');
-  return new Response(response.body, { status: 200, headers });
+  return new Response(body, { status: 200, headers: responseHeaders(entry.ttl, expires, 'MISS') });
 }
