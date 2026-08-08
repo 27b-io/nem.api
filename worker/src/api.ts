@@ -1,6 +1,6 @@
 // HTTP query API (LAB-418): /api/v2/values, /api/v2/values/aggregate,
-// /api/v2/generators, /api/v2/intensity — a greenfields v2 contract over the
-// D1 store. PUBLIC
+// /api/v2/dispatch, /api/v2/generators, /api/v2/intensity — a greenfields v2
+// contract over the D1 store. PUBLIC
 // (ray, 2026-07-24: public until abuse is detected), so the contract in
 // worker/API.md (owned jointly with the LAB-419 frontend) is the product.
 // The legacy restify API (api/v1.1) is reference-only, not a contract.
@@ -203,6 +203,12 @@ export const GENERATOR_FILTERS: Array<{ column: string; aliases: string[] }> = [
   { column: 'technology_type', aliases: ['tech', 'technology_type'] },
   { column: 'technology_description', aliases: ['tech_desc', 'technology_description'] },
   { column: 'duid', aliases: ['duid'] },
+];
+
+// The only filter /api/v2/dispatch accepts (dispatch_region has no generator
+// dimensions). Exported for src/cache.ts, same single-sourcing as above.
+export const DISPATCH_FILTERS: Array<{ column: string; aliases: string[] }> = [
+  { column: 'region', aliases: ['region', 'state'] },
 ];
 
 // Operator inference, all values bound: a comma means IN, `*` means LIKE
@@ -468,6 +474,76 @@ async function handleAggregate(env: Env, params: URLSearchParams): Promise<Respo
   });
 }
 
+/**
+ * GET /api/v2/dispatch (LAB-1700): per-region 5-minute spot price and demand
+ * from DispatchIS, bucketed with the same window/resolution grammar as
+ * `values`. Price carries BOTH the bucket mean and the bucket max — a
+ * $10k/MWh spike must not vanish into an hourly mean. Demand is mean-only.
+ * Reads raw dispatch_region rows at every resolution: the table is ~5 rows
+ * per interval (~570k rows over the full retention), orders of magnitude
+ * under the raw-path memory ceiling that forced rollups for scada_values.
+ * No group_by (region IS the series), no sort (fixed time-ascending, like
+ * aggregate). Interconnector flows are stored but deliberately not exposed.
+ */
+async function handleDispatch(env: Env, params: URLSearchParams): Promise<Response> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const window = resolveTimeWindow(params, nowSeconds);
+  const resolution = resolveResolution(params, window, nowSeconds);
+  const { limit, offset } = resolveLimit(params);
+
+  const where = timeClauses(window, 'settlement_time');
+  for (const { column, aliases } of DISPATCH_FILTERS) {
+    const raw = firstParam(params, aliases);
+    if (raw !== undefined) where.push(filterClause(column, column, raw));
+  }
+
+  // AVG/MAX ignore NULL sides of a partially-ingested row; an all-NULL bucket
+  // yields null in the aligned arrays, same "no sample" semantics as values.
+  const sql =
+    `SELECT ${bucketExpr('settlement_time', resolution)} AS bucket, region, ` +
+    'ROUND(AVG(rrp), 4) AS price, ROUND(MAX(rrp), 4) AS price_max, ROUND(AVG(total_demand), 4) AS demand ' +
+    'FROM dispatch_region ' +
+    `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
+    'GROUP BY bucket, region ORDER BY bucket ASC, region ASC LIMIT ? OFFSET ?';
+  const binds = [...where.flatMap((c) => c.binds), limit, offset];
+
+  const { results } = await env.DB.prepare(sql)
+    .bind(...binds)
+    .all<{ bucket: number; region: string; price: number | null; price_max: number | null; demand: number | null }>();
+
+  // Pivot the three metrics onto one shared time axis (pivot() is
+  // single-metric; three passes over ≤ a few thousand rows is not worth a
+  // generalisation).
+  const timestamps = [...new Set(results.map((r) => r.bucket))].sort((a, b) => a - b);
+  const index = new Map(timestamps.map((t, i) => [t, i]));
+  const byRegion = new Map<string, { price: (number | null)[]; price_max: (number | null)[]; demand: (number | null)[] }>();
+  for (const row of results) {
+    let series = byRegion.get(row.region);
+    if (series === undefined) {
+      const empty = () => new Array<number | null>(timestamps.length).fill(null);
+      series = { price: empty(), price_max: empty(), demand: empty() };
+      byRegion.set(row.region, series);
+    }
+    const i = index.get(row.bucket) as number;
+    series.price[i] = row.price;
+    series.price_max[i] = row.price_max;
+    series.demand[i] = row.demand;
+  }
+
+  const series = [...byRegion.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([region, s]) => ({ region, ...s }));
+
+  return json({
+    start: window.start ?? null,
+    end: window.end ?? null,
+    resolution,
+    truncated: results.length === limit,
+    timestamps,
+    series,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Carbon intensity (LAB-1698)
 
@@ -724,6 +800,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         return await handleValues(env, url.searchParams);
       case '/api/v2/values/aggregate':
         return await handleAggregate(env, url.searchParams);
+      case '/api/v2/dispatch':
+        return await handleDispatch(env, url.searchParams);
       case '/api/v2/generators':
         return await handleGenerators(env, url.searchParams);
       case '/api/v2/intensity':
@@ -732,7 +810,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         return jsonError(
           404,
           'unknown route: available are /api/v2/values, /api/v2/values/aggregate, ' +
-            '/api/v2/generators, /api/v2/intensity',
+            '/api/v2/dispatch, /api/v2/generators, /api/v2/intensity',
         );
     }
   } catch (err) {

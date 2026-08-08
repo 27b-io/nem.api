@@ -52,7 +52,8 @@ export function parseSettlementDate(text: string): number | null {
   return ms / 1000 - NEM_UTC_OFFSET_SECONDS;
 }
 
-function unquote(field: string): string {
+/** Strip the MMS CSV quoting convention (quoted fields never contain commas). */
+export function unquote(field: string): string {
   return field.startsWith('"') && field.endsWith('"') && field.length >= 2 ? field.slice(1, -1) : field;
 }
 
