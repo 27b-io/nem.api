@@ -1,5 +1,6 @@
 import { BACKFILL_CRON, runBackfill } from './backfill';
 import { handleApiCached } from './cache';
+import { EMISSIONS_CRON, runEmissionsRefresh } from './emissions';
 import { runIngest } from './ingest';
 
 export interface Env {
@@ -31,17 +32,21 @@ export default {
     return new Response('Not found', { status: 404 });
   },
 
-  // Two cron schedules share this handler (wrangler.toml), dispatched on the
-  // exact cron string: the offset schedule runs the ARCHIVE backfill, anything
-  // else the 5-minute CURRENT ingest — so a drifted backfill expression
-  // degrades to extra idempotent ingest runs, never a silent no-op handler.
-  // Per-file/day errors are isolated inside each runner; a throw here (e.g.
-  // the listing fetch itself failing) marks the cron invocation failed in the
-  // dashboard, which is exactly the visibility we want — the next run catches
-  // up regardless.
+  // Three cron schedules share this handler (wrangler.toml), dispatched on
+  // the exact cron string: the offset schedule runs the ARCHIVE backfill, the
+  // daily one the CDEII emissions refresh, anything else the 5-minute CURRENT
+  // ingest — so a drifted expression degrades to extra idempotent ingest
+  // runs, never a silent no-op handler. Per-file/day errors are isolated
+  // inside each runner; a throw here (e.g. the listing fetch itself failing)
+  // marks the cron invocation failed in the dashboard, which is exactly the
+  // visibility we want — the next run catches up regardless.
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
     if (controller.cron === BACKFILL_CRON) {
       await runBackfill(env);
+      return;
+    }
+    if (controller.cron === EMISSIONS_CRON) {
+      await runEmissionsRefresh(env);
       return;
     }
     await runIngest(env);

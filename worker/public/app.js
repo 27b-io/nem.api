@@ -32,13 +32,19 @@ const REGIONS = [
 
 const TZ = 'Australia/Brisbane'; // NEM market time: AEST, UTC+10, never DST (not Sydney)
 const fmtMW = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
+const fmtPct = new Intl.NumberFormat('en-AU', { style: 'percent', maximumFractionDigits: 1 });
 const fmtTime = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
 const fmtDate = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short' });
 
 const $ = (id) => document.getElementById(id);
 const chartEl = $('chart');
 
-const state = { region: '', payload: null, ordered: [], chart: null };
+/* intensity (LAB-1698): { values, coverage } — values in gCO2-e/kWh aligned
+ * to payload.timestamps (null where the API had no factored generation or no
+ * matching bucket); null altogether when the intensity fetch failed. The
+ * overlay is best-effort chrome on top of the fuel view: its failure never
+ * blocks the chart. */
+const state = { region: '', payload: null, ordered: [], chart: null, intensity: null, showIntensity: true };
 
 function currentTheme() {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -49,6 +55,7 @@ function chartTokens() {
     surface: style.getPropertyValue('--chart-surface').trim(),
     grid: style.getPropertyValue('--chart-grid').trim(),
     axisInk: style.getPropertyValue('--chart-axis-ink').trim(),
+    intensityInk: style.getPropertyValue('--chart-intensity-ink').trim(),
   };
 }
 
@@ -67,6 +74,41 @@ function renderChart() {
     grid: { stroke: tokens.grid, width: 1 },
     ticks: { stroke: tokens.grid, width: 1 },
   };
+  const axes = [
+    { ...axis, label: 'Time (AEST)', labelSize: 22 },
+    { ...axis, label: 'MW (net)', size: 64, values: (u, vals) => vals.map((v) => fmtMW.format(v)) },
+  ];
+  const scales = {
+    y: { range: (u, min, max) => [min < 0 ? min * 1.06 : 0, max > 0 ? max * 1.04 : 1] },
+  };
+
+  // Carbon-intensity overlay (LAB-1698): a 2px neutral-ink LINE on its own
+  // right-hand scale — a ratio (g/kWh) sharing a time axis with the MW stack,
+  // never the MW scale. Appended after the stack rows so band indices from
+  // buildStack stay valid. Ink is --chart-intensity-ink (see tailwind.css for
+  // the CVD/contrast validation notes); identity is carried by mark shape
+  // (line vs fill) + the labeled axis + the readout, not by hue.
+  const overlay = state.showIntensity && state.intensity !== null;
+  if (overlay) {
+    data.push(state.intensity.values);
+    seriesOpts.push({
+      label: 'CO₂ intensity',
+      scale: 'co2',
+      stroke: tokens.intensityInk,
+      width: 2,
+      points: { show: false },
+    });
+    scales.co2 = { range: (u, min, max) => [0, (max > 0 ? max : 1) * 1.08] };
+    axes.push({
+      ...axis,
+      scale: 'co2',
+      side: 1,
+      label: 'gCO₂-e/kWh',
+      size: 56,
+      grid: { show: false }, // one grid only — the MW grid owns the plot
+      values: (u, vals) => vals.map((v) => fmtMW.format(v)),
+    });
+  }
 
   state.chart = new uPlot({
     width,
@@ -76,13 +118,8 @@ function renderChart() {
     fmtDate: (tpl) => uPlot.fmtDate(tpl.replace('{M}/{D}/{YY}', '{D}/{M}/{YY}').replace('{M}/{D}', '{D}/{M}')),
     series: seriesOpts,
     bands,
-    scales: {
-      y: { range: (u, min, max) => [min < 0 ? min * 1.06 : 0, max > 0 ? max * 1.04 : 1] },
-    },
-    axes: [
-      { ...axis, label: 'Time (AEST)', labelSize: 22 },
-      { ...axis, label: 'MW (net)', size: 64, values: (u, vals) => vals.map((v) => fmtMW.format(v)) },
-    ],
+    scales,
+    axes,
     cursor: { y: false, points: { show: false } },
     legend: { show: false },
     hooks: { setCursor: [(u) => renderReadout(u.cursor.idx)] },
@@ -135,6 +172,23 @@ function renderReadout(cursorIdx) {
   totalVal.textContent = sawValue ? fmtMW.format(total) : '—';
   totalRow.append(totalName, totalVal);
   readout.append(totalRow);
+
+  // Intensity is a value channel of its own, so it rides the readout whether
+  // or not the chart overlay is toggled on (the readout is the relief channel
+  // for every number on this page).
+  if (state.intensity !== null) {
+    const co2 = state.intensity.values[idx];
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2';
+    const name = document.createElement('span');
+    name.className = 'text-base-content/70';
+    name.textContent = 'CO₂ intensity, est.';
+    const val = document.createElement('span');
+    val.className = 'ms-auto font-medium tabular-nums';
+    val.textContent = co2 == null ? '—' : `${fmtMW.format(co2)} g/kWh`;
+    row.append(name, val);
+    readout.append(row);
+  }
 }
 
 function renderHero() {
@@ -156,6 +210,16 @@ function renderHero() {
   // An all-null latest bucket (ingest lag) is "no reading", not 0 MW.
   $('hero-total').textContent = sawValue ? `${fmtMW.format(total)} MW` : '—';
   $('hero-asat').textContent = `as at ${fmtTime.format(ts)} AEST · ${fmtDate.format(ts)}`;
+
+  // Headline intensity stat (LAB-1698): same latest-bucket convention as the
+  // MW hero — null is "no reading", never 0. Coverage names the share of
+  // generation MW carrying a published factor (the honesty disclosure).
+  const co2 = state.intensity?.values[last];
+  $('hero-co2').textContent = co2 == null ? '—' : fmtMW.format(co2);
+  // Floor to 0.1% so partial coverage can never round UP to a false "100%".
+  const coverage = state.intensity?.coverage;
+  const floored = coverage == null ? null : Math.floor(coverage * 1000) / 1000;
+  $('hero-co2-coverage').textContent = floored == null ? '' : `factors cover ${fmtPct.format(floored)} of MW`;
 }
 
 function render() {
@@ -175,6 +239,36 @@ function showError(message) {
 // latest selection (or clear a newer request's busy state).
 let activeLoad = 0;
 
+/* Fetch the intensity series for a region and align it onto the fuel
+ * payload's time axis (the two requests can resolve one interval apart at a
+ * cache boundary — join on timestamps, never by index). API units are
+ * tCO2-e/MWh; ×1000 → the gCO2-e/kWh the dashboard displays. Returns null on
+ * any failure: the overlay is best-effort and must never take down the fuel
+ * view. */
+async function fetchIntensity(region, timestamps) {
+  try {
+    const res = await fetch('/api/v2/intensity' + (region ? `?region=${encodeURIComponent(region)}` : ''));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    // With a region filter the region series equals NEM (= total of matched);
+    // prefer the explicit key, fall back to the NEM total.
+    const series = payload.series.find((s) => s.key === (region || 'NEM'))
+      ?? payload.series.find((s) => s.key === 'NEM');
+    if (!series) return null;
+    const byTime = new Map(payload.timestamps.map((t, i) => [t, series.values[i]]));
+    return {
+      values: timestamps.map((t) => {
+        const v = byTime.get(t);
+        return v == null ? null : Math.round(v * 1000);
+      }),
+      coverage: series.coverage,
+    };
+  } catch (err) {
+    console.error('intensity load failed:', err);
+    return null;
+  }
+}
+
 async function load(region) {
   const loadId = ++activeLoad;
   const url = '/api/v2/values/aggregate?group_by=fuel'
@@ -189,8 +283,10 @@ async function load(region) {
       throw new Error(detail);
     }
     const payload = await res.json();
+    const intensity = await fetchIntensity(region, payload.timestamps);
     if (loadId !== activeLoad) return;
     state.payload = payload;
+    state.intensity = intensity;
     state.region = region;
     $('error-alert').classList.add('hidden');
     render();
@@ -258,6 +354,13 @@ new ResizeObserver(() => {
 }).observe(chartEl);
 
 $('error-retry').addEventListener('click', () => load(state.region));
+
+// Overlay toggle re-renders the chart only — the stat and readout keep
+// reporting intensity either way (they are the value relief channel).
+$('intensity-toggle').addEventListener('change', () => {
+  state.showIntensity = $('intensity-toggle').checked;
+  renderChart();
+});
 
 initTheme();
 renderRegionFilter();

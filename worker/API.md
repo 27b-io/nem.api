@@ -189,6 +189,67 @@ straddling `time_start`/`time_end` reports the full bucket's mean rather than
 only the in-window portion. Exact `time=` lookups and resolutions
 `300`/`1800` read raw rows as before.
 
+## `GET /api/v2/intensity`
+
+Grid **carbon intensity** per NEM region plus a NEM total, in **tCO2-e/MWh**
+(multiply by 1000 for gCO2-e/kWh). Same time-window and bucketing grammar as
+`values`, and the same generator filters; no `group_by`, `limit`, `offset` or
+`sort` (the response is bounded by buckets × regions).
+
+```jsonc
+{
+  "start": 1784901600,
+  "end": 1784988000,
+  "resolution": 1800,
+  "units": "tCO2e/MWh",
+  "timestamps": [1784903400],
+  "series": [
+    // NEM first (the total across ALL matched generators), then regions A→Z.
+    // coverage = share of generation MW carrying a published factor, at the
+    // latest bucket where the series has generation (null until it has any).
+    { "key": "NEM",  "coverage": 0.9993, "values": [0.5286] },
+    { "key": "NSW1", "coverage": 1,      "values": [0.4363] }
+  ]
+}
+```
+
+### Methodology
+
+Computed from **AEMO CDEII published emission factors × dispatch SCADA**:
+per bucket, `intensity = Σ(MW × factor) / Σ(MW)` over generating units — the
+energy-weighted ratio-of-sums, the same method as AEMO's official daily
+CO2E intensity index (total emissions ÷ total energy). Factors are
+AEMO's per-DUID `CO2E_EMISSIONS_FACTOR` values
+([NEMWEB CDEII](https://nemweb.com.au/Reports/Current/CDEII/), refreshed
+daily by cron), joined to SCADA values on DUID. **These are estimates**,
+reconciled against AEMO's official daily index (LAB-1698 recorded ±10%
+agreement per region over sample days).
+
+Caveats a consumer must know:
+
+- **Generation only**: values ≤ 0 MW (storage charging, pumped-hydro pumping,
+  station load draw) are excluded from both numerator and denominator —
+  intensity describes the generation mix, not load. At rollup resolutions
+  (`3600`/`86400`) the sign test applies to the bucket's per-generator net
+  sum rather than each 5-minute sample; sign-flipping units are batteries and
+  pump loads with factor 0, so the difference is a negligible denominator
+  nudge.
+- **As-generated vs sent-out**: SCADA is as-generated MW while AEMO's factors
+  and official index apply to sent-out energy (net of auxiliary load), so
+  this estimate runs a few percent **high**, most for coal plant.
+- **Static factors**: a unit's factor is a constant; real part-load heat-rate
+  variation is not modelled.
+- **Unfactored units are "unknown", never zero-emission**: a unit without a
+  published factor is excluded from the ratio and disclosed via `coverage`
+  (share of generation MW that carries a factor). A bucket with no factored
+  generation at all yields `null`, not `0`.
+- Same rollup-path edge semantics as `values/aggregate`: at resolutions
+  `3600`/`86400` a bucket straddling the window edge reports the full
+  bucket's ratio, and exact `time=` lookups read raw rows.
+- Factors refresh daily (upstream publishes weekly); a fully-past window
+  cached before a factor change can serve the older factors for up to the
+  24 h closed-window TTL.
+
 ## `GET /api/v2/generators`
 
 Filtered generator reference rows as a **bare JSON array**, ordered by `id`.

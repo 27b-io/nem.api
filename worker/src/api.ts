@@ -1,5 +1,6 @@
 // HTTP query API (LAB-418): /api/v2/values, /api/v2/values/aggregate,
-// /api/v2/generators — a greenfields v2 contract over the D1 store. PUBLIC
+// /api/v2/intensity, /api/v2/generators — a greenfields v2 contract over the
+// D1 store. PUBLIC
 // (ray, 2026-07-24: public until abuse is detected), so the contract in
 // worker/API.md (owned jointly with the LAB-419 frontend) is the product.
 // The legacy restify API (api/v1.1) is reference-only, not a contract.
@@ -446,6 +447,150 @@ async function handleAggregate(env: Env, params: URLSearchParams): Promise<Respo
   });
 }
 
+/**
+ * Grid carbon intensity (LAB-1698): per-bucket emissions intensity in
+ * tCO2-e/MWh, computed as the energy-weighted ratio-of-sums
+ * SUM(MW x factor) / SUM(MW) over generating units, per NEM region plus a
+ * NEM total. Factors are AEMO's published CDEII per-DUID emission factors
+ * (src/emissions.ts), joined via generators.duid; the same ratio method
+ * AEMO's official daily index uses (TOTAL_EMISSIONS / TOTAL_SENT_OUT_ENERGY),
+ * against which this series is reconciled — full methodology + caveats in
+ * API.md.
+ *
+ * Conventions (documented in API.md, tested in test/intensity.spec.ts):
+ * - GENERATION ONLY: rows with value <= 0 (storage charging, pumping, station
+ *   load draw) are excluded from numerator AND denominator — intensity is a
+ *   property of generation, and counting charging load as negative energy
+ *   would corrupt the ratio. On the rollup path the sign test applies at
+ *   bucket-generator grain (sum_value > 0): a unit that both charged and
+ *   discharged inside one bucket contributes its net; in practice
+ *   sign-flipping units are batteries/pumped hydro with factor 0, so the
+ *   residual effect is a negligible denominator nudge.
+ * - COVERAGE, not silence: units without a published factor stay in the
+ *   denominator of `coverage` (share of generation MW that has a factor,
+ *   latest bucket) but are excluded from the intensity ratio itself — an
+ *   unfactored unit is "unknown", never "zero-emission".
+ * - The ratio cancels the interval-count denominator the fuel aggregate
+ *   needs, so the rollup path reads scada_hourly/scada_daily without the
+ *   scada_intervals join; routing (raw vs rollup) matches the aggregate.
+ * - `NEM` series = total across ALL matched generators (equal to the single
+ *   region's series when a region filter is applied).
+ */
+async function handleIntensity(env: Env, params: URLSearchParams): Promise<Response> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const window = resolveTimeWindow(params, nowSeconds);
+  const resolution = resolveResolution(params, window, nowSeconds);
+  const filters = generatorFilters(params, 'g.');
+
+  // AEMO publishes one factor per DUID today (genset rows within a DUID never
+  // disagree — the emissions refresh warns if that ever changes), so AVG is
+  // an exact per-DUID factor, deterministic either way.
+  const factorJoin =
+    'LEFT JOIN (SELECT duid, AVG(factor) AS factor FROM emission_factors GROUP BY duid) f ON f.duid = g.duid ';
+  const sums = (mw: string) =>
+    `SUM(${mw}) AS mw, ` +
+    `SUM(CASE WHEN f.factor IS NULL THEN 0 ELSE ${mw} END) AS mw_f, ` +
+    `SUM(CASE WHEN f.factor IS NULL THEN 0 ELSE ${mw} * f.factor END) AS em `;
+
+  let sql: string;
+  let binds: (string | number)[];
+  if (window.exact === undefined && resolution >= 3600) {
+    // Rollup path — same routing rule as the aggregate endpoint (LAB-1696):
+    // long windows must never GROUP BY raw 5-minute rows. Same visible edge
+    // semantics too: a bucket straddling the window edge reports the FULL
+    // bucket's ratio.
+    const table = resolution === 86400 ? 'scada_daily' : 'scada_hourly';
+    const where: SqlFragment[] = [{ sql: 'r.sum_value > 0', binds: [] }];
+    if (window.start !== undefined) where.push({ sql: 'r.bucket >= ?', binds: [nemBucket(window.start, resolution)] });
+    if (window.end !== undefined) where.push({ sql: 'r.bucket <= ?', binds: [nemBucket(window.end, resolution)] });
+    where.push(...filters);
+    sql =
+      `SELECT r.bucket AS bucket, g.state AS region, ${sums('r.sum_value')}` +
+      `FROM ${table} r JOIN generators g ON g.id = r.generator_id ` +
+      factorJoin +
+      `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
+      'GROUP BY r.bucket, region ORDER BY r.bucket ASC, region ASC';
+    binds = where.flatMap((c) => c.binds);
+  } else {
+    const where: SqlFragment[] = [{ sql: 'sv.value > 0', binds: [] }];
+    where.push(...timeClauses(window, 'sv.scrape_time'), ...filters);
+    sql =
+      `SELECT ${bucketExpr('sv.scrape_time', resolution)} AS bucket, g.state AS region, ${sums('sv.value')}` +
+      'FROM scada_values sv JOIN generators g ON g.id = sv.generator_id ' +
+      factorJoin +
+      `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
+      'GROUP BY bucket, region ORDER BY bucket ASC, region ASC';
+    binds = where.flatMap((c) => c.binds);
+  }
+
+  const { results } = await env.DB.prepare(sql)
+    .bind(...binds)
+    .all<{ bucket: number; region: string; mw: number; mw_f: number; em: number }>();
+
+  // Pivot per-region rows AND synthesize the NEM total from the same sums
+  // (ratios cannot be summed; the underlying MW/emissions can).
+  const timestamps = [...new Set(results.map((r) => r.bucket))].sort((a, b) => a - b);
+  const index = new Map(timestamps.map((t, i) => [t, i]));
+  interface Acc {
+    mw: number[];
+    mwF: number[];
+    em: number[];
+  }
+  const blank = (): Acc => ({
+    mw: new Array<number>(timestamps.length).fill(0),
+    mwF: new Array<number>(timestamps.length).fill(0),
+    em: new Array<number>(timestamps.length).fill(0),
+  });
+  // NEM synthesized only when there is data — an empty window returns
+  // `series: []`, not a hollow NEM series.
+  const byRegion = new Map<string, Acc>();
+  if (results.length > 0) byRegion.set('NEM', blank());
+  for (const row of results) {
+    const i = index.get(row.bucket) as number;
+    let acc = byRegion.get(row.region);
+    if (acc === undefined) {
+      acc = blank();
+      byRegion.set(row.region, acc);
+    }
+    for (const a of [acc, byRegion.get('NEM') as Acc]) {
+      a.mw[i] += row.mw;
+      a.mwF[i] += row.mw_f;
+      a.em[i] += row.em;
+    }
+  }
+
+  const series = [...byRegion.entries()]
+    .sort(([a], [b]) => (a === 'NEM' ? -1 : b === 'NEM' ? 1 : a < b ? -1 : 1))
+    .map(([key, acc]) => {
+      // Coverage disclosure: share of generation MW carrying a factor, at the
+      // latest bucket where this series has any generation. Null until data.
+      let coverage: number | null = null;
+      for (let i = timestamps.length - 1; i >= 0; i--) {
+        if (acc.mw[i] > 0) {
+          coverage = Math.round((acc.mwF[i] / acc.mw[i]) * 10000) / 10000;
+          break;
+        }
+      }
+      return {
+        key,
+        coverage,
+        values: acc.mw.map((mw, i) =>
+          // No factored generation in the bucket = unknown, never 0.
+          acc.mwF[i] > 0 ? Math.round((acc.em[i] / acc.mwF[i]) * 10000) / 10000 : null,
+        ),
+      };
+    });
+
+  return json({
+    start: window.start ?? null,
+    end: window.end ?? null,
+    resolution,
+    units: 'tCO2e/MWh',
+    timestamps,
+    series,
+  });
+}
+
 async function handleGenerators(env: Env, params: URLSearchParams): Promise<Response> {
   const filters = generatorFilters(params);
   const where = filters.length > 0 ? ` WHERE ${filters.map((f) => f.sql).join(' AND ')}` : '';
@@ -478,10 +623,15 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         return await handleValues(env, url.searchParams);
       case '/api/v2/values/aggregate':
         return await handleAggregate(env, url.searchParams);
+      case '/api/v2/intensity':
+        return await handleIntensity(env, url.searchParams);
       case '/api/v2/generators':
         return await handleGenerators(env, url.searchParams);
       default:
-        return jsonError(404, 'unknown route: available are /api/v2/values, /api/v2/values/aggregate, /api/v2/generators');
+        return jsonError(
+          404,
+          'unknown route: available are /api/v2/values, /api/v2/values/aggregate, /api/v2/intensity, /api/v2/generators',
+        );
     }
   } catch (err) {
     if (err instanceof ApiError) return jsonError(err.status, err.message);

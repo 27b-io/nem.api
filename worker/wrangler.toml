@@ -30,12 +30,16 @@ migrations_dir = "migrations"
 binding = "ARCHIVE"
 bucket_name = "nem-api-archive"
 
-# Two schedules, dispatched in src/index.ts on the exact cron string:
+# Three schedules, dispatched in src/index.ts on the exact cron string:
 #   */5        — SCADA CURRENT ingest (LAB-417): one file per 5-minute dispatch
 #                interval, diffed against the `scrape` ledger.
 #   11,26,...  — ARCHIVE daily backfill (LAB-420): must stay byte-identical to
 #                BACKFILL_CRON in src/backfill.ts; offset so it never lands on
 #                a */5 minute. Drains ~13 months of daily zips in ~a day, then
 #                idles as a standing >2-day gap healer.
+#   38 19      — CDEII emissions refresh (LAB-1698): must stay byte-identical
+#                to EMISSIONS_CRON in src/emissions.ts. Daily (05:38 AEST,
+#                off the */5 grid) although upstream publishes weekly — a
+#                failed run self-heals within a day.
 [triggers]
-crons = ["*/5 * * * *", "11,26,41,56 * * * *"]
+crons = ["*/5 * * * *", "11,26,41,56 * * * *", "38 19 * * *"]

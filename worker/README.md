@@ -155,6 +155,23 @@ that set small. `DG_*` (dummy generators) and `RT_*` (RERT reserve-trader
 units) are AEMO virtual dispatch units that never appear in the registration
 list — they are *expected* to stay in the unknown-DUID log.
 
+## CDEII emissions refresh (Cron, daily)
+
+`src/emissions.ts`, triggered by the `38 19 * * *` cron (05:38 AEST). Fetches
+AEMO's [CDEII](https://nemweb.com.au/Reports/Current/CDEII/) per-generator
+emission factors (~630 rows → `emission_factors`) and the official daily
+intensity index (→ `cdeii_index`), feeding `/api/v2/intensity` (methodology in
+`API.md`). Parse-then-replace in one D1 transaction: format drift or an empty
+download throws before any write, so the previous snapshot survives; a failed
+run self-heals on the next day's cron (upstream only publishes weekly).
+Manual run: `curl "http://127.0.0.1:8787/__scheduled?cron=38+19+*+*+*"`.
+
+Reconciliation harness: `node scripts/reconcile-intensity.mjs` recomputes
+daily regional intensity from the production API's raw values × live factors
+and compares it against the official index (±10%, absolute band for near-zero
+regions like TAS). Run it when the methodology, factor join, or negative-MW
+handling changes; `--self-check` runs its fixture test offline.
+
 ## Generator registration refresh (weekly, out-of-band)
 
 The DUID→generator reference data self-updates from AEMO's live

@@ -169,7 +169,7 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
     if (route === '/api/v2/generators') {
       parts.push(...filterParts(params));
       ttl = GENERATORS_TTL_SECONDS;
-    } else if (route === '/api/v2/values' || route === '/api/v2/values/aggregate') {
+    } else if (route === '/api/v2/values' || route === '/api/v2/values/aggregate' || route === '/api/v2/intensity') {
       if (route === '/api/v2/values/aggregate') {
         // group_by is echoed verbatim in the body, so `region` and its
         // storage alias `state` are distinct responses — no collapsing here.
@@ -196,18 +196,23 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
 
       const resolution = resolveResolution(params, window, nowSeconds);
       parts.push(`res=${resolution}`);
-      const { limit, offset } = resolveLimit(params);
-      parts.push(`lim=${limit}`, `off=${offset}`, `ord=${resolveOrder(params)}`);
+      if (route !== '/api/v2/intensity') {
+        // intensity has no paging/sort params — keeping them out of its key
+        // means a stray `limit=` cannot mint duplicate entries there.
+        const { limit, offset } = resolveLimit(params);
+        parts.push(`lim=${limit}`, `off=${offset}`, `ord=${resolveOrder(params)}`);
+      }
       parts.push(...filterParts(params));
 
       // Upper bound of the data the window can see (t = exact matches only).
       let upper =
         window.exact !== undefined && window.end !== undefined ? Math.min(window.exact, window.end) : (window.exact ?? window.end);
-      // Rollup-served aggregates (LAB-1696, resolution 3600/86400, no exact)
-      // return the FULL bucket straddling `time_end`, so the response keeps
-      // changing until that bucket completes — the closed test must clear the
-      // bucket end, not just `time_end` itself.
-      if (upper !== undefined && route === '/api/v2/values/aggregate' && window.exact === undefined && resolution >= 3600) {
+      // Rollup-served shapes (LAB-1696 aggregates and LAB-1698 intensity,
+      // resolution 3600/86400, no exact) return the FULL bucket straddling
+      // `time_end`, so the response keeps changing until that bucket
+      // completes — the closed test must clear the bucket end, not just
+      // `time_end` itself.
+      if (upper !== undefined && route !== '/api/v2/values' && window.exact === undefined && resolution >= 3600) {
         upper = nemBucket(upper, resolution);
       }
       // Closed = every sample the response can ever reflect has been

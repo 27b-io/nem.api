@@ -47,18 +47,32 @@
 
     <section class="card chart-surface rounded-lg border border-base-300 shadow-sm">
       <div class="card-body gap-4 p-4 sm:p-6">
-        <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <div class="flex flex-wrap items-baseline gap-x-6 gap-y-1">
           <div>
             <p class="text-[0.65rem] uppercase tracking-widest text-base-content/50">
               Grid-scale generation, net
             </p>
             <p class="text-4xl font-semibold sm:text-5xl" id="hero-total" aria-live="polite">&mdash;</p>
           </div>
+          <div>
+            <p class="text-[0.65rem] uppercase tracking-widest text-base-content/50">
+              Carbon intensity, est.
+            </p>
+            <p class="text-4xl font-semibold sm:text-5xl">
+              <span id="hero-co2" aria-live="polite">&mdash;</span><span
+                class="text-base font-normal text-base-content/60"> gCO&#8322;-e/kWh</span>
+            </p>
+            <p class="text-xs text-base-content/50" id="hero-co2-coverage"></p>
+          </div>
           <p class="text-sm text-base-content/60" id="hero-asat"></p>
           <span class="badge badge-warning badge-sm hidden" id="truncated-badge"
                 title="The API row limit cut this window short — totals may be incomplete.">
             window truncated
           </span>
+          <label class="ms-auto flex cursor-pointer items-center gap-2 text-xs text-base-content/70">
+            <input type="checkbox" id="intensity-toggle" class="toggle toggle-xs" checked>
+            CO&#8322; intensity overlay
+          </label>
         </div>
 
         <div class="alert alert-error hidden text-sm" id="error-alert" role="alert">
@@ -79,6 +93,15 @@
           nor total supply. Values are net MW: storage draws below zero while charging.
           Times are AEST (NEM market time, UTC+10, no DST); each point is the 5-minute
           interval ending at that time.
+        </p>
+        <p class="text-xs text-base-content/60">
+          <span class="font-medium">Carbon intensity</span> is computed from AEMO CDEII
+          published emission factors &times; dispatch SCADA &mdash; estimates, reconciled
+          against AEMO&rsquo;s official daily intensity index. Generation only (storage
+          charging and pumping are excluded); units without a published factor are
+          excluded from the ratio and disclosed as coverage. As-generated SCADA vs
+          AEMO&rsquo;s sent-out factors means estimates run a few percent high.
+          <a class="link" href="https://github.com/27b-io/nem.api/blob/master/worker/API.md">Full methodology</a>.
         </p>
       </div>
     </section>

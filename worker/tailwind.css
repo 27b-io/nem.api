@@ -17,11 +17,18 @@
   --chart-surface: #ffffff;
   --chart-grid: #e1e0d9;
   --chart-axis-ink: #898781;
+  /* Carbon-intensity overlay ink (LAB-1698): a NEUTRAL lightness-extreme ink,
+     deliberately not an 8th fuel hue — intensity is a different measure class
+     (ratio, not MW), and the neutral + line-vs-fill shape difference survives
+     every CVD type (validator: CVD separation passes vs all fills both modes;
+     contrast 14.7:1 light / 12:1 dark). */
+  --chart-intensity-ink: #1f2937;
 }
 [data-theme="dark"] {
   --chart-surface: #1d232a;
   --chart-grid: #2c2c2a;
   --chart-axis-ink: #898781;
+  --chart-intensity-ink: #e5e7eb;
 }
 
 .chart-surface {
