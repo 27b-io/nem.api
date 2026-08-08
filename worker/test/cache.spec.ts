@@ -140,6 +140,26 @@ describe('buildCacheEntry — TTL policy', () => {
     // Exact-time aggregate lookups stay on the raw path and close as before.
     expect(agg(`?group_by=fuel&time=${T0 + 600}&resolution=86400`, midBucket).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
   });
+
+  it('rollup-served intensity gets the same edge-bucket treatment (LAB-1698)', () => {
+    // Same seam as the aggregate above: /api/v2/intensity is rollup-served at
+    // 3600/86400 and returns the FULL straddling bucket, so pinning it as
+    // closed would publish a partial day's carbon intensity as final for 24 h.
+    const ci = (q: string, now: number) => entryFor(q, now, 'nem-api.test', '/api/v2/intensity')!;
+    const q = `?time_start=${T0}&time_end=${T0 + 600}&resolution=86400`;
+    const midBucket = T0 + 43200;
+    expect(ci(q, midBucket).ttl).toBe(boundaryTtl(midBucket));
+    expect(ci(q, T0 + 86400 + INGEST_GRACE_SECONDS).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+  });
+
+  it('ignores params intensity does not read, so they cannot mint duplicate entries', () => {
+    // limit/offset/sort/generator filters are unrecognised on this route — a
+    // recognised-elsewhere param must not become a free cache-bust here.
+    const ci = (q: string) => entryFor(q, NOW, 'nem-api.test', '/api/v2/intensity')!.key;
+    const base = ci(`?time_start=${T0}&time_end=${T0 + 600}`);
+    expect(ci(`?time_start=${T0}&time_end=${T0 + 600}&limit=5&offset=99`)).toBe(base);
+    expect(ci(`?time_start=${T0}&time_end=${T0 + 600}&region=NSW1&sort=value,desc`)).toBe(base);
+  });
 });
 
 describe('handleApiCached — integration', () => {
