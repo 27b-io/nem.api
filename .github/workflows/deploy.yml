@@ -1,6 +1,6 @@
 # CD: deploy the Worker on every push to the default branch (currently `master`;
 # `main` included so a future rename doesn't silently kill deploys).
-# Requires one repo secret: CLOUDFLARE_API_TOKEN — see worker/README.md.
+# Requires two repo secrets: CLOUDFLARE_API_TOKEN and SMOKE_BYPASS_TOKEN — see worker/README.md.
 name: Deploy
 
 on:
@@ -43,8 +43,22 @@ jobs:
         run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Cloudflare's edge bot/IP filtering 403s GitHub-hosted runners (datacenter
+      # IPs) before requests ever reach the Worker (LAB-1760). A WAF custom rule
+      # on the 27b.io zone SKIPs that filtering only for /health requests carrying
+      # this secret header, so the check still exercises the real public route.
+      # SMOKE_BYPASS_TOKEN must match the value in the WAF rule — see
+      # worker/README.md "Deploy". --dump-header prints RESPONSE headers only
+      # (cf-ray / cf-mitigated, for Security-Events triage on failure); never use
+      # `curl -v` here, it would echo the request header — and the secret — into
+      # the public run log.
       - name: Smoke-check /health
+        env:
+          SMOKE_BYPASS_TOKEN: ${{ secrets.SMOKE_BYPASS_TOKEN }}
         run: |
+          : "${SMOKE_BYPASS_TOKEN:?repo secret SMOKE_BYPASS_TOKEN not set — see worker/README.md Deploy}"
           sleep 15
           curl --fail --silent --show-error --retry 5 --retry-delay 10 --retry-all-errors \
+            --dump-header - \
+            --header "X-Smoke-Bypass: ${SMOKE_BYPASS_TOKEN}" \
             https://nem.27b.io/health
