@@ -39,11 +39,17 @@
   </header>
 
   <main class="mx-auto max-w-6xl space-y-4 p-4">
-    <!-- Filter row: region is the one MVP filter (LAB-419 AC). -->
-    <nav class="flex flex-wrap items-center gap-3" aria-label="Region filter">
-      <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Region</span>
-      <div class="join" id="region-filter" role="group"></div>
-    </nav>
+    <!-- Filter row: region (LAB-419) + time range (LAB-1697); they compose. -->
+    <div class="flex flex-wrap items-center gap-x-6 gap-y-3">
+      <nav class="flex flex-wrap items-center gap-3" aria-label="Region filter">
+        <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Region</span>
+        <div class="join" id="region-filter" role="group"></div>
+      </nav>
+      <nav class="flex flex-wrap items-center gap-3" aria-label="Time range filter">
+        <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Range</span>
+        <div class="join" id="range-filter" role="group"></div>
+      </nav>
+    </div>
 
     <section class="card chart-surface rounded-lg border border-base-300 shadow-sm">
       <div class="card-body gap-4 p-4 sm:p-6">
@@ -77,8 +83,8 @@
         <p class="text-xs text-base-content/60">
           Grid-scale generation only &mdash; excludes rooftop solar, so this is neither demand
           nor total supply. Values are net MW: storage draws below zero while charging.
-          Times are AEST (NEM market time, UTC+10, no DST); each point is the 5-minute
-          interval ending at that time.
+          Times are AEST (NEM market time, UTC+10, no DST); each point is the interval
+          ending at that time &mdash; 5-minute at 24H, stepping up to daily at longer ranges.
         </p>
       </div>
     </section>
