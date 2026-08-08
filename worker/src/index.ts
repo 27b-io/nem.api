@@ -52,7 +52,14 @@ export default {
   // regardless. Per-file/day errors are isolated inside each runner.
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
     if (controller.cron === CDEII_CRON) {
-      await refreshCdeii(env);
+      try {
+        await refreshCdeii(env);
+      } catch (err) {
+        // Same contract as the feed loop below: log with a greppable label,
+        // then rethrow so the invocation shows failed in the dashboard.
+        console.error('cdeii: refresh failed:', err);
+        throw err;
+      }
       return;
     }
     const backfill = controller.cron === BACKFILL_CRON;

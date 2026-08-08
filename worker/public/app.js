@@ -81,11 +81,12 @@ const priceDrawable = () => state.overlays.price && state.region !== '';
 const overlaysWanted = () => state.overlays.price || state.overlays.demand;
 
 /* Carbon intensity (LAB-1698) for the selected region, aligned to the fuel
- * payload's buckets by TIMESTAMP rather than by index: both endpoints read the
- * same dispatch data over the same default window so the axes normally match
- * exactly, but a lookup degrades to a gap instead of silently shifting the
- * overlay if they ever don't. Returns null when the overlay has nothing to
- * draw, which is also the honest state before the first CDEII refresh runs. */
+ * payload's buckets by TIMESTAMP rather than by index: both endpoints are
+ * fetched with the same range query so the axes normally match exactly, but a
+ * lookup degrades to a gap instead of silently shifting the overlay if they
+ * ever don't (e.g. ingest lag skew at the window edge). Returns null when the
+ * overlay has nothing to draw, which is also the honest state before the
+ * first CDEII refresh runs. */
 function intensityForRegion() {
   const { intensity, payload } = state;
   if (!intensity || !payload) return null;
@@ -464,10 +465,13 @@ async function load(region, range) {
     // Overlay failures are isolated: an overlay that can't load must not take
     // the fuel mix with it — each degrades to a missing overlay and logs.
     // Intensity carries no region param — the endpoint always returns every
-    // region, so one cached response serves the whole selector.
+    // region, so one cached response serves the whole selector. It MUST carry
+    // the same range query as the aggregate: intensityForRegion joins the two
+    // payloads strictly by timestamp, and equal windows are what make their
+    // bucket axes equal (same rule as fetchDispatch below).
     const [payload, intensity, dispatch] = await Promise.all([
       fetchJson(url),
-      fetch('/api/v2/intensity')
+      fetch(`/api/v2/intensity?${rangeQuery(range)}`)
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .catch((err) => {
           console.error('carbon-intensity load failed:', err);

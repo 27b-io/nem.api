@@ -152,10 +152,13 @@ describe('fetchNemweb', () => {
     const abort = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
     vi.stubGlobal('fetch', () => Promise.reject(abort));
     const url = 'https://nemweb.com.au/Reports/Current/Dispatch_SCADA/x.zip';
-    const err = await fetchNemweb(url).then(
+    const err: unknown = await fetchNemweb(url).then(
       () => { throw new Error('expected rejection'); },
-      (e: unknown) => e as Error,
+      (e: unknown) => e,
     );
+    // instanceof narrows with a runtime check — the mapping contract IS that
+    // the rejection is an Error, so failing here is the test doing its job.
+    if (!(err instanceof Error)) throw new Error(`expected an Error rejection, got ${String(err)}`);
     expect(err.message).toBe(`NEMWEB fetch failed (${url}): The operation was aborted due to timeout`);
     expect(err.cause).toBe(abort);
   });
