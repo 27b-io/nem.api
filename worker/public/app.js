@@ -1,9 +1,11 @@
-/* NEM fuel-mix dashboard (LAB-419).
+/* NEM fuel-mix dashboard (LAB-419, time-range selector LAB-1697).
  *
  * Consumes GET /api/v2/values/aggregate?group_by=fuel (worker/API.md, the
  * pinned public contract) — `timestamps` and each series' `values` are used
  * as-is; the only client-side math is the cumulative transform a stacked
  * area needs for rendering. Raw net MW is always what the readout shows.
+ * Range→param mapping lives in ranges.js (pure, unit-tested) — no explicit
+ * `resolution` is ever sent, the API auto-steps it by window span.
  *
  * Values are NET MW (contract): a fuel band can go negative (batteries
  * charging, station load). Stacking is therefore diverging: each fuel is
@@ -24,6 +26,7 @@
  * mandated relief channel): solar #eda100 is 2.17:1 on white; fossil #8f4d0f
  * is 2.44:1 on the dark surface. */
 import { buildStack, orderSeries } from './stacking.js';
+import { bucketLabel, DEFAULT_RANGE, isRange, RANGES, rangeParams } from './ranges.js';
 
 const REGIONS = [
   ['', 'NEM'], ['QLD1', 'QLD'], ['NSW1', 'NSW'],
@@ -38,7 +41,19 @@ const fmtDate = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, weekday: 'short
 const $ = (id) => document.getElementById(id);
 const chartEl = $('chart');
 
-const state = { region: '', payload: null, ordered: [], chart: null };
+// Region and range are shareable-link state: a valid ?region=/&range= wins
+// at boot, anything unrecognised falls back to the pre-LAB-1697 default.
+const bootQuery = new URLSearchParams(location.search);
+const bootRegion = bootQuery.get('region') ?? '';
+const bootRange = bootQuery.get('range') ?? DEFAULT_RANGE;
+
+const state = {
+  region: REGIONS.some(([v]) => v === bootRegion) ? bootRegion : '',
+  range: isRange(bootRange) ? bootRange : DEFAULT_RANGE,
+  payload: null,
+  ordered: [],
+  chart: null,
+};
 
 function currentTheme() {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -104,8 +119,12 @@ function renderReadout(cursorIdx) {
   }
   const idx = cursorIdx ?? payload.timestamps.length - 1;
   const ts = payload.timestamps[idx];
-  $('readout-time').textContent =
-    `Interval ending ${fmtTime.format(ts * 1e3)} AEST · ${fmtDate.format(ts * 1e3)}`;
+  const label = bucketLabel(payload.resolution);
+  // Daily buckets always end at AEST midnight (worker/API.md) — showing the
+  // time would just repeat "00:00" for every point, so drop it.
+  $('readout-time').textContent = payload.resolution >= 86400
+    ? `${label} ending ${fmtDate.format(ts * 1e3)} AEST`
+    : `${label} ending ${fmtTime.format(ts * 1e3)} AEST · ${fmtDate.format(ts * 1e3)}`;
 
   let total = 0;
   let sawValue = false;
@@ -171,14 +190,25 @@ function showError(message) {
   $('error-alert').classList.remove('hidden');
 }
 
-// Monotonic token so a slow, stale region response can never overwrite the
-// latest selection (or clear a newer request's busy state).
+// Reflects state.region/range in the URL as shareable-link params; omits
+// each when it's the default so a plain boot keeps today's clean URL.
+function syncURL() {
+  const params = new URLSearchParams(location.search);
+  if (state.region) params.set('region', state.region); else params.delete('region');
+  if (state.range !== DEFAULT_RANGE) params.set('range', state.range); else params.delete('range');
+  const qs = params.toString();
+  history.replaceState(null, '', qs ? `?${qs}` : location.pathname);
+}
+
+// Monotonic token so a slow, stale region/range response can never overwrite
+// the latest selection (or clear a newer request's busy state).
 let activeLoad = 0;
 
-async function load(region) {
+async function load(region, range) {
   const loadId = ++activeLoad;
-  const url = '/api/v2/values/aggregate?group_by=fuel'
-    + (region ? `&region=${encodeURIComponent(region)}` : '');
+  const params = new URLSearchParams({ group_by: 'fuel', ...rangeParams(range) });
+  if (region) params.set('region', region);
+  const url = `/api/v2/values/aggregate?${params.toString()}`;
   chartEl.classList.add('opacity-50'); // refetch keeps the previous frame
   chartEl.setAttribute('aria-busy', 'true');
   try {
@@ -192,6 +222,8 @@ async function load(region) {
     if (loadId !== activeLoad) return;
     state.payload = payload;
     state.region = region;
+    state.range = range;
+    syncURL();
     $('error-alert').classList.add('hidden');
     render();
   } catch (err) {
@@ -206,22 +238,42 @@ async function load(region) {
   }
 }
 
-function renderRegionFilter() {
-  const nav = $('region-filter');
+// Shared by the region and range join button-groups (LAB-419 pattern,
+// extended for LAB-1697). `onSelect` sets its own state field BEFORE
+// awaiting load() — required so a click on the other filter while this
+// fetch is still in flight builds its request from the just-clicked value,
+// not the last-committed one (expert panel LAB-1697: cross-filter click
+// race could otherwise silently drop a selection).
+function renderFilterGroup(navId, options, selected, onSelect) {
+  const nav = $(navId);
   nav.textContent = '';
-  for (const [value, label] of REGIONS) {
+  for (const [value, label] of options) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn join-item btn-sm' + (value === state.region ? ' btn-active' : '');
-    btn.setAttribute('aria-pressed', String(value === state.region));
+    btn.className = 'btn join-item btn-sm' + (value === selected ? ' btn-active' : '');
+    btn.setAttribute('aria-pressed', String(value === selected));
     btn.textContent = label;
-    btn.addEventListener('click', async () => {
-      if (value === state.region) return;
-      await load(value);
-      renderRegionFilter();
+    btn.addEventListener('click', () => {
+      if (value !== selected) onSelect(value);
     });
     nav.append(btn);
   }
+}
+
+function renderRegionFilter() {
+  renderFilterGroup('region-filter', REGIONS, state.region, async (value) => {
+    state.region = value;
+    await load(value, state.range);
+    renderRegionFilter();
+  });
+}
+
+function renderRangeFilter() {
+  renderFilterGroup('range-filter', RANGES, state.range, async (value) => {
+    state.range = value;
+    await load(state.region, value);
+    renderRangeFilter();
+  });
 }
 
 // Theme toggle: explicit choice persists; OS changes apply only while the
@@ -257,8 +309,9 @@ new ResizeObserver(() => {
   }
 }).observe(chartEl);
 
-$('error-retry').addEventListener('click', () => load(state.region));
+$('error-retry').addEventListener('click', () => load(state.region, state.range));
 
 initTheme();
 renderRegionFilter();
-load('');
+renderRangeFilter();
+load(state.region, state.range);
