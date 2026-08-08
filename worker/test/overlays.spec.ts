@@ -46,6 +46,10 @@ describe('alignOverlays', () => {
       price: [null, null, null],
       demand: [null, null, null],
     });
+    expect(alignOverlays(chartTs, { timestamps: [100] }, 'NSW1')).toEqual({
+      price: [null, null, null],
+      demand: [null, null, null],
+    });
     expect(alignOverlays(chartTs, dispatch, 'QLD1')).toEqual({
       price: [null, null, null],
       demand: [null, null, null],
@@ -107,9 +111,12 @@ describe('alignRooftop', () => {
     expect(alignRooftop([dayEnd], 86400, daily, 'NSW1')).toEqual([980]);
   });
 
-  it('handles a missing or empty payload and an unknown region without throwing', () => {
+  it('handles a missing, empty, or series-less payload and an unknown region without throwing', () => {
     expect(alignRooftop([H1], 300, null, 'NSW1')).toEqual([null]);
     expect(alignRooftop([H1], 300, { timestamps: [], series: [] }, 'NSW1')).toEqual([null]);
+    // timestamps without a series array (malformed body behind a 200) must
+    // degrade to the same honest-absent state, not throw mid-render.
+    expect(alignRooftop([H1], 300, { timestamps: [H1] }, 'NSW1')).toEqual([null]);
     expect(alignRooftop([H1], 300, rooftop, 'QLD1')).toEqual([null]);
   });
 });

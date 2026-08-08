@@ -46,7 +46,12 @@ export const OVERLAY_INKS = {
  * null only when none do. */
 export function alignRooftop(chartTimestamps, chartResolution, rooftop, region) {
   const values = new Array(chartTimestamps.length).fill(null);
-  if (!rooftop || !Array.isArray(rooftop.timestamps) || rooftop.timestamps.length === 0) {
+  if (
+    !rooftop ||
+    !Array.isArray(rooftop.timestamps) ||
+    rooftop.timestamps.length === 0 ||
+    !Array.isArray(rooftop.series)
+  ) {
     return values;
   }
 
@@ -80,7 +85,12 @@ export function alignRooftop(chartTimestamps, chartResolution, rooftop, region) 
 export function alignOverlays(chartTimestamps, dispatch, region) {
   const price = new Array(chartTimestamps.length).fill(null);
   const demand = new Array(chartTimestamps.length).fill(null);
-  if (!dispatch || !Array.isArray(dispatch.timestamps) || dispatch.timestamps.length === 0) {
+  if (
+    !dispatch ||
+    !Array.isArray(dispatch.timestamps) ||
+    dispatch.timestamps.length === 0 ||
+    !Array.isArray(dispatch.series)
+  ) {
     return { price, demand };
   }
 

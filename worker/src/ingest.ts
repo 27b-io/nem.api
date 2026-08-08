@@ -368,7 +368,7 @@ export const DISPATCH_IS_FEED: Feed<DispatchIsBatch> = {
 // ---------------------------------------------------------------------------
 // Rooftop PV feed (LAB-1701)
 
-/** Idempotent chunked upsert of rooftop PV rows; one D1 batch per call. */
+/** Idempotent chunked upsert of rooftop PV rows; one D1 batch (= one transaction) per call. */
 export async function upsertRooftopRows(db: D1Database, rows: RooftopRow[]): Promise<void> {
   if (rows.length === 0) return;
   const statements: D1PreparedStatement[] = [];
