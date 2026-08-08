@@ -250,10 +250,9 @@ async function fetchIntensity(region, timestamps) {
     const res = await fetch('/api/v2/intensity' + (region ? `?region=${encodeURIComponent(region)}` : ''));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
-    // With a region filter the region series equals NEM (= total of matched);
-    // prefer the explicit key, fall back to the NEM total.
-    const series = payload.series.find((s) => s.key === (region || 'NEM'))
-      ?? payload.series.find((s) => s.key === 'NEM');
+    // With a region filter the region series equals NEM (= total of matched),
+    // so the requested key is present whenever any series is.
+    const series = payload.series.find((s) => s.key === (region || 'NEM'));
     if (!series) return null;
     const byTime = new Map(payload.timestamps.map((t, i) => [t, series.values[i]]));
     return {

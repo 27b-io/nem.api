@@ -72,7 +72,7 @@ function parseCdeii(text) {
  * per-generator daily sample arrays.
  * gens: [{ region, factor|null, values: (number|null)[] }]
  */
-export function computeIntensity(gens) {
+function computeIntensity(gens) {
   const acc = new Map(); // region -> {mw,mwF,em, dMw,dMwF,dEm}
   const get = (r) => acc.get(r) ?? acc.set(r, { mw: 0, mwF: 0, em: 0, dMw: 0, dMwF: 0, dEm: 0 }).get(r);
   for (const g of gens) {

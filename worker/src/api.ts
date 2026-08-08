@@ -476,11 +476,31 @@ async function handleAggregate(env: Env, params: URLSearchParams): Promise<Respo
  * - `NEM` series = total across ALL matched generators (equal to the single
  *   region's series when a region filter is applied).
  */
+// Raw-path window budget (expert panel, LAB-1698): an explicit fine
+// resolution over a wide window GROUP-BYs raw 5-minute rows — the exact
+// D1 SQLITE_NOMEM failure the rollups exist to avoid (LAB-1696). Intensity
+// is a NEW contract, so it rejects those queries from day one (the
+// pre-existing aggregate/values exposure is LAB-1721's product decision).
+// Budgets match the auto-resolution tiers' next step up.
+const RAW_SPAN_BUDGET: Record<number, number> = { 300: 14 * 86400, 1800: 90 * 86400 };
+
 async function handleIntensity(env: Env, params: URLSearchParams): Promise<Response> {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const window = resolveTimeWindow(params, nowSeconds);
   const resolution = resolveResolution(params, window, nowSeconds);
   const filters = generatorFilters(params, 'g.');
+
+  if (window.exact === undefined && resolution < 3600) {
+    const span = (window.end ?? nowSeconds) - (window.start ?? 0);
+    const budget = RAW_SPAN_BUDGET[resolution];
+    if (span > budget) {
+      throw new ApiError(
+        400,
+        `window too wide for resolution ${resolution} (max ${budget / 86400} days): ` +
+          'narrow the window or use resolution 3600/86400',
+      );
+    }
+  }
 
   // AEMO publishes one factor per DUID today (genset rows within a DUID never
   // disagree — the emissions refresh warns if that ever changes), so AVG is
@@ -564,10 +584,12 @@ async function handleIntensity(env: Env, params: URLSearchParams): Promise<Respo
     .map(([key, acc]) => {
       // Coverage disclosure: share of generation MW carrying a factor, at the
       // latest bucket where this series has any generation. Null until data.
+      // FLOORED, not rounded (expert panel): partial coverage must never
+      // round up to a false 1.0 on the public contract.
       let coverage: number | null = null;
       for (let i = timestamps.length - 1; i >= 0; i--) {
         if (acc.mw[i] > 0) {
-          coverage = Math.round((acc.mwF[i] / acc.mw[i]) * 10000) / 10000;
+          coverage = Math.floor((acc.mwF[i] / acc.mw[i]) * 10000) / 10000;
           break;
         }
       }

@@ -133,6 +133,27 @@ describe('raw-path intensity math', () => {
     ]);
   });
 
+  it('FLOORS coverage — 0.99999 must never serve as a false 1.0', async () => {
+    await seed([
+      { scrapeTime: T0 + 300, generatorId: bw01, value: 99999 },
+      { scrapeTime: T0 + 300, generatorId: TSTX1, value: 1 }, // unfactored sliver
+    ]);
+    const body = await (
+      await get(`/api/v2/intensity?time_start=${T0}&time_end=${T0 + 300}&resolution=300`)
+    ).json<IntensityBody>();
+    expect(body.series.find((s) => s.key === 'NSW1')?.coverage).toBe(0.9999);
+  });
+
+  it('rejects an explicit fine resolution over a wide window (raw-path budget)', async () => {
+    const wide = await get(`/api/v2/intensity?time_start=${T0}&time_end=${T0 + 15 * DAY}&resolution=300`);
+    expect(wide.status).toBe(400);
+    const wider = await get(`/api/v2/intensity?time_start=${T0}&time_end=${T0 + 91 * DAY}&resolution=1800`);
+    expect(wider.status).toBe(400);
+    // The same spans are fine at rollup resolutions, and 300 within budget is fine.
+    expect((await get(`/api/v2/intensity?time_start=${T0}&time_end=${T0 + 91 * DAY}&resolution=86400`)).status).toBe(200);
+    expect((await get(`/api/v2/intensity?time_start=${T0}&time_end=${T0 + 3 * DAY}&resolution=300`)).status).toBe(200);
+  });
+
   it('applies generator filters (region narrows both the region series and the NEM total)', async () => {
     await seed([
       { scrapeTime: T0 + 300, generatorId: bw01, value: 100 },

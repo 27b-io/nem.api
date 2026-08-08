@@ -182,7 +182,12 @@ export async function ingestEmissions(db: D1Database, factorsCsv: string, summar
   // a methodology change someone must look at: warn with the DUIDs.
   const byDuid = new Map<string, Set<number>>();
   for (const row of factors.rows) {
-    (byDuid.get(row.duid) ?? byDuid.set(row.duid, new Set()).get(row.duid))!.add(row.factor);
+    let seen = byDuid.get(row.duid);
+    if (seen === undefined) {
+      seen = new Set();
+      byDuid.set(row.duid, seen);
+    }
+    seen.add(row.factor);
   }
   const conflicting = [...byDuid.entries()].filter(([, f]) => f.size > 1).map(([d]) => d);
   if (conflicting.length > 0) {

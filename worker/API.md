@@ -194,7 +194,11 @@ only the in-window portion. Exact `time=` lookups and resolutions
 Grid **carbon intensity** per NEM region plus a NEM total, in **tCO2-e/MWh**
 (multiply by 1000 for gCO2-e/kWh). Same time-window and bucketing grammar as
 `values`, and the same generator filters; no `group_by`, `limit`, `offset` or
-`sort` (the response is bounded by buckets × regions).
+`sort` (the response is bounded by buckets × regions). One deliberate
+restriction the older endpoints don't have (yet — that contract decision is
+LAB-1721): an **explicit fine resolution is capped by window span** —
+`resolution=300` allows ≤ 14 days, `1800` ≤ 90 days; wider windows are a 400
+(use `3600`/`86400`, which serve the full retention from rollups).
 
 ```jsonc
 {
