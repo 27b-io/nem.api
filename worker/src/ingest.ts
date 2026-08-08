@@ -93,6 +93,19 @@ async function alreadyIngested(db: D1Database, filenames: string[]): Promise<Set
  * Shared by the CURRENT ingest and the ARCHIVE backfill (src/backfill.ts);
  * both call it after their value upsert and before their ledger write — the
  * ordering contract lives on refreshRollups (src/rollups.ts).
+ *
+ * Cache visibility of the upsert→refresh gap (rollup readers see the new
+ * rows only after this completes): relative windows are never closed-cached
+ * (nowDerived ⇒ boundary TTL), and explicit rollup-resolution windows only
+ * count as closed once their FULL edge bucket has ended plus
+ * INGEST_GRACE_SECONDS (src/cache.ts) — by then this refresh, which runs
+ * seconds after the boundary inside the same ingest run, has completed. An
+ * ingest running longer than the grace (backlogged catch-up run) can
+ * closed-cache a stale response either way: pre-upsert both paths miss the
+ * final sample; in the upsert→refresh sliver the rollup edge bucket runs one
+ * sample behind raw. Both are the same accepted slow-ingest residual,
+ * bounded by CLOSED_WINDOW_TTL_SECONDS — not fixable by reordering, since
+ * rollups are computed FROM the upserted rows.
  */
 export async function refreshTouchedRollups(db: D1Database, rows: MappedRow[]): Promise<void> {
   if (rows.length === 0) return;

@@ -82,5 +82,14 @@ export async function refreshRollups(db: D1Database, minTime: number, maxTime: n
           'sum_value = excluded.sum_value, n_samples = excluded.n_samples',
       )
       .bind(...dayBinds),
-  ]);
+  ]).catch((err: unknown) => {
+    // The rethrow is load-bearing: callers skip their ledger write on failure
+    // so the file retries whole (values + rollups). Log the touched range
+    // here so a tail trace names the failing refresh, not just the file.
+    console.error(
+      `rollups: refresh failed for buckets in hourly range (${hourBinds[0]}, ${hourBinds[1]}]:`,
+      err instanceof Error ? err.message : err,
+    );
+    throw err;
+  });
 }
