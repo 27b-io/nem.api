@@ -17,6 +17,7 @@
 
 import { unzipSync } from 'fflate';
 import type { Env } from './index';
+import { refreshRollups } from './rollups';
 import { parseUnitScadaCsv } from './scada';
 
 export const CURRENT_LISTING_URL = 'https://nemweb.com.au/Reports/CURRENT/Dispatch_SCADA/';
@@ -87,6 +88,36 @@ async function alreadyIngested(db: D1Database, filenames: string[]): Promise<Set
   return new Set(results.map((r) => r.filename));
 }
 
+/**
+ * Refresh the rollup buckets (LAB-1696) covering a batch of upserted rows.
+ * Shared by the CURRENT ingest and the ARCHIVE backfill (src/backfill.ts);
+ * both call it after their value upsert and before their ledger write — the
+ * ordering contract lives on refreshRollups (src/rollups.ts).
+ *
+ * Cache visibility of the upsert→refresh gap (rollup readers see the new
+ * rows only after this completes): relative windows are never closed-cached
+ * (nowDerived ⇒ boundary TTL), and explicit rollup-resolution windows only
+ * count as closed once their FULL edge bucket has ended plus
+ * INGEST_GRACE_SECONDS (src/cache.ts) — by then this refresh, which runs
+ * seconds after the boundary inside the same ingest run, has completed. An
+ * ingest running longer than the grace (backlogged catch-up run) can
+ * closed-cache a stale response either way: pre-upsert both paths miss the
+ * final sample; in the upsert→refresh sliver the rollup edge bucket runs one
+ * sample behind raw. Both are the same accepted slow-ingest residual,
+ * bounded by CLOSED_WINDOW_TTL_SECONDS — not fixable by reordering, since
+ * rollups are computed FROM the upserted rows.
+ */
+export async function refreshTouchedRollups(db: D1Database, rows: MappedRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  let minTime = rows[0].scrapeTime;
+  let maxTime = minTime;
+  for (const row of rows) {
+    if (row.scrapeTime < minTime) minTime = row.scrapeTime;
+    if (row.scrapeTime > maxTime) maxTime = row.scrapeTime;
+  }
+  await refreshRollups(db, minTime, maxTime);
+}
+
 /** Idempotent chunked upsert; one D1 batch (= one transaction) per call. */
 export async function upsertValues(db: D1Database, rows: MappedRow[]): Promise<void> {
   if (rows.length === 0) return;
@@ -137,6 +168,7 @@ async function ingestFile(
   }
 
   await upsertValues(env.DB, mapped);
+  await refreshTouchedRollups(env.DB, mapped); // pre-ledger, per the refreshRollups contract
 
   // Archive the raw zip under a deterministic key; a no-op when already there.
   const key = `current/${filename}`;

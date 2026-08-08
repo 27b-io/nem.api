@@ -30,6 +30,7 @@
 
 import { createCache, workersCacheAPI, type WorkersCache } from '@cachekit-io/cachekit/workers';
 import type { Env } from './index';
+import { nemBucket } from './rollups';
 import {
   CORS_HEADERS,
   firstParam,
@@ -59,7 +60,10 @@ export const GENERATORS_TTL_SECONDS = 3600;
 // Bump to invalidate every existing entry on a key-format, CachedResponse
 // shape, or policy change — get<CachedResponse> is a blind cast, so a shape
 // change without a bump would deserialize stale entries with missing fields.
-const KEY_VERSION = 'k1';
+// k2: LAB-1696 changed aggregate values at resolution 3600/86400 (rollup
+// path: full-bucket edge semantics, global-denominator means) — pre-rollup
+// entries must not survive the cutover.
+const KEY_VERSION = 'k2';
 
 /**
  * Seconds until this entry must expire so it never outlives the data:
@@ -190,16 +194,25 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
         if (window.end !== undefined) parts.push(`te=${window.end}`);
       }
 
-      parts.push(`res=${resolveResolution(params, window, nowSeconds)}`);
+      const resolution = resolveResolution(params, window, nowSeconds);
+      parts.push(`res=${resolution}`);
       const { limit, offset } = resolveLimit(params);
       parts.push(`lim=${limit}`, `off=${offset}`, `ord=${resolveOrder(params)}`);
       parts.push(...filterParts(params));
 
       // Upper bound of the data the window can see (t = exact matches only).
-      const upper =
+      let upper =
         window.exact !== undefined && window.end !== undefined ? Math.min(window.exact, window.end) : (window.exact ?? window.end);
-      // Closed = every sample the window can ever see has been ingested: the
-      // interval containing `upper` has ended AND its ingest grace has passed.
+      // Rollup-served aggregates (LAB-1696, resolution 3600/86400, no exact)
+      // return the FULL bucket straddling `time_end`, so the response keeps
+      // changing until that bucket completes — the closed test must clear the
+      // bucket end, not just `time_end` itself.
+      if (upper !== undefined && route === '/api/v2/values/aggregate' && window.exact === undefined && resolution >= 3600) {
+        upper = nemBucket(upper, resolution);
+      }
+      // Closed = every sample the response can ever reflect has been
+      // ingested: the interval containing `upper` has ended AND its ingest
+      // grace has passed.
       const closed =
         !nowDerived &&
         upper !== undefined &&

@@ -124,6 +124,22 @@ describe('buildCacheEntry — TTL policy', () => {
   it('generators uses its fixed reference-data TTL', () => {
     expect(entryFor('', NOW, 'nem-api.test', '/api/v2/generators')!.ttl).toBe(GENERATORS_TTL_SECONDS);
   });
+
+  it('rollup-served aggregates stay boundary-cached until their edge bucket completes (LAB-1696)', () => {
+    // time_end is past, but the daily bucket containing it (ends T0+86400)
+    // is still filling — the rollup path serves the FULL bucket, so the
+    // response keeps changing and must not cache as closed.
+    const agg = (q: string, now: number) => entryFor(q, now, 'nem-api.test', '/api/v2/values/aggregate')!;
+    const q = `?group_by=fuel&time_start=${T0}&time_end=${T0 + 600}&resolution=86400`;
+    const midBucket = T0 + 43200;
+    expect(agg(q, midBucket).ttl).toBe(boundaryTtl(midBucket));
+    // The raw-path /values twin of the same window IS closed at that moment.
+    expect(entryFor(q.replace('group_by=fuel&', ''), midBucket)!.ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+    // Once the bucket end clears the ingest grace, the aggregate closes too.
+    expect(agg(q, T0 + 86400 + INGEST_GRACE_SECONDS).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+    // Exact-time aggregate lookups stay on the raw path and close as before.
+    expect(agg(`?group_by=fuel&time=${T0 + 600}&resolution=86400`, midBucket).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+  });
 });
 
 describe('handleApiCached — integration', () => {

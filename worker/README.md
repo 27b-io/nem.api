@@ -261,6 +261,42 @@ npx wrangler d1 execute nem-api-db --remote --command \
   "DELETE FROM scrape WHERE filename GLOB 'PUBLIC_DISPATCHSCADA_????????.zip'"
 ```
 
+## Aggregate rollups (LAB-1696)
+
+`/api/v2/values/aggregate` at resolution `3600`/`86400` is served from
+pre-aggregated per-generator tables (`scada_hourly`, `scada_daily`, plus the
+per-bucket interval counts in `scada_intervals` — `migrations/0004_rollups.sql`)
+instead of GROUP-BYing raw 5-minute rows: beyond ~90 days the raw grouping
+exhausts D1's SQLite memory budget (`D1_ERROR: out of memory: SQLITE_NOMEM`,
+confirmed via `wrangler tail` 2026-08-08), and the full 13-month window scans
+~50M raw rows vs ~200k daily rollup rows. Resolutions `300`/`1800` and exact
+`time=` lookups keep the raw path.
+
+Maintenance is automatic: both writers (5-minute CURRENT ingest and ARCHIVE
+backfill) call `refreshRollups` (`src/rollups.ts`) after upserting values and
+**before** their `scrape`-ledger write, recomputing every touched bucket whole
+from `scada_values` in one transaction. Ledger-last means a failed refresh
+retries with its file — rollups cannot go permanently stale behind a ledgered
+file, and any drift heals by re-running the affected file/day (or the script
+below).
+
+**One-off backfill / repair** — populates (or reconverges) the rollup tables
+from existing `scada_values`, one AEST-month chunk per statement (a single
+full-history statement hits the same SQLITE_NOMEM ceiling; same lesson as the
+LAB-733 verification queries). Idempotent, safe to re-run any time:
+
+```sh
+node scripts/backfill-rollups.mjs --remote   # or --local
+```
+
+The script verifies its own invariant on completion (every distinct raw
+interval counted exactly once across `scada_intervals`) and exits non-zero on
+mismatch. Deploy-ordering note: apply the migration and run this backfill
+**before** deploying Worker code that routes queries to the rollups, then
+re-run it once **after** the deploy — it converges the buckets ingested in
+the window between backfill and cutover (pre-deploy code did not maintain
+rollups yet).
+
 ## Migrations
 
 Plain SQL files in `migrations/`, applied in filename order and tracked by

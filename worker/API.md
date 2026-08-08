@@ -179,6 +179,16 @@ across the group's generators (mean-of-sums — stays correct when a unit
 misses an interval inside the bucket). Negative intervals (storage charging,
 station load) are summed net, per the convention above.
 
+Resolutions `3600`/`86400` are served from pre-aggregated rollups (LAB-1696)
+so long windows — up to the full ~13-month retention — stay interactive
+instead of failing. Two visible consequences at these two resolutions only:
+a group with **no samples at all** in some of a bucket's intervals is averaged
+over the bucket's full interval count (a unit offline half a day reads as its
+energy-correct daily mean, not its while-running mean), and a bucket
+straddling `time_start`/`time_end` reports the full bucket's mean rather than
+only the in-window portion. Exact `time=` lookups and resolutions
+`300`/`1800` read raw rows as before.
+
 ## `GET /api/v2/generators`
 
 Filtered generator reference rows as a **bare JSON array**, ordered by `id`.
