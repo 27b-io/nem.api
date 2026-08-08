@@ -35,9 +35,13 @@ describe('worker entrypoint', () => {
 // never does — no failed invocation, no log, just data quietly going stale.
 describe('cron schedules', () => {
   it('are declared in wrangler.toml exactly as the dispatcher expects', () => {
-    const crons = /crons\s*=\s*\[([^\]]*)\]/.exec(wranglerToml)?.[1] ?? '';
-    for (const cron of [BACKFILL_CRON, CDEII_CRON]) {
-      expect(crons, `wrangler.toml crons must contain "${cron}"`).toContain(`"${cron}"`);
-    }
+    const blocks = [...wranglerToml.matchAll(/crons\s*=\s*\[([^\]]*)\]/g)];
+    expect(blocks, 'wrangler.toml must declare exactly one crons array').toHaveLength(1);
+    const declared = [...blocks[0][1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+    // Set equality, both directions: a constant wrangler.toml dropped AND a
+    // wrangler.toml cron no constant matches (which would silently fall
+    // through to the ingest). '*/5 * * * *' IS the ingest fall-through — the
+    // one schedule that has no constant, pinned here instead.
+    expect(declared).toEqual(['*/5 * * * *', BACKFILL_CRON, CDEII_CRON].sort());
   });
 });

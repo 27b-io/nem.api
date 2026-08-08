@@ -248,14 +248,18 @@ function renderHeroIntensity() {
   // the tooltip attributes a coverage figure to a reading it doesn't describe.
   const i = series ? series.values.findLastIndex((v) => v != null) : -1;
   el.textContent = i < 0 ? '—' : `${fmtMW.format(series.values[i] * G_PER_KWH)} g`;
+  const coverageEl = $('hero-coverage');
   if (i >= 0) {
-    // Coverage is part of the number's meaning, not a footnote: say so on hover.
-    const coverage = series.coverage[i];
+    // Coverage is part of the number's meaning, not a footnote: render it as
+    // visible text (title alone is unreachable for keyboard/touch/AT users).
+    const coverage = series.coverage?.[i];
+    coverageEl.textContent = coverage == null ? '' : `${(coverage * 100).toFixed(1)}% factor coverage`;
     el.title =
       `gCO₂-e per kWh, estimated. ${
         coverage == null ? '' : `${(coverage * 100).toFixed(1)}% of dispatched MW carried a published factor. `
       }Reads a few percent high (as-generated vs sent-out).`;
   } else {
+    coverageEl.textContent = '';
     // A failed fetch is not a statement about emission factors — saying so
     // would put a false methodology claim on a public page.
     el.title =

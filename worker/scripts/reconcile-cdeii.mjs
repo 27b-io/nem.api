@@ -21,6 +21,12 @@ const arg = (name, fallback) => {
 
 const BASE = arg('base', 'https://nem.27b.io');
 const DAYS = Number(arg('days', 7));
+if (!Number.isFinite(DAYS) || DAYS <= 0) {
+  // Catch `--days` as the last argument (undefined → NaN) and `--days abc`
+  // here as a usage error, not downstream as an opaque HTTP 400.
+  console.error('--days must be a positive number');
+  process.exit(2);
+}
 
 // Tolerance is relative OR absolute, whichever is kinder — the numpy
 // allclose shape. A pure relative gate is meaningless where the official
@@ -33,7 +39,15 @@ const ATOL = 0.02;
 
 const url =
   `${BASE}/api/v2/intensity?days=${DAYS}&resolution=86400`;
-const res = await fetch(url);
+let res;
+try {
+  // A hung or unreachable endpoint is a gate failure, not a hang: bound the
+  // request and turn transport errors into the same exit-code-2 diagnostic.
+  res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+} catch (err) {
+  console.error(`fetch failed for ${url}: ${err.cause?.message ?? err.message}`);
+  process.exit(2);
+}
 if (!res.ok) {
   console.error(`HTTP ${res.status} fetching ${url}`);
   process.exit(2);
@@ -55,6 +69,13 @@ console.log(`Reconciling ${BASE} against AEMO's official CDEII index (rtol ${RTO
 console.log('date        region  ours     official  delta     coverage');
 
 for (const series of body.series) {
+  if (!Array.isArray(series.official)) {
+    // The top-of-script guard only proved series[0] is daily-shaped; a
+    // partial/degraded response must still die as a diagnostic, not a
+    // TypeError three lines down.
+    console.error(`series ${series.key} has no official array — response is not daily`);
+    process.exit(2);
+  }
   for (let i = 0; i < body.timestamps.length; i++) {
     const ours = series.values[i];
     const official = series.official[i];

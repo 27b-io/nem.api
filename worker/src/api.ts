@@ -679,8 +679,11 @@ function round4(n: number): number {
   return Math.round(n * 1e4) / 1e4;
 }
 
-/** AEMO's official daily index for the covered buckets, keyed `bucket\0region`. */
+/** AEMO's official daily index for the covered buckets, keyed `<bucket> <region>`. */
 async function loadOfficialIndex(env: Env, timestamps: number[]): Promise<Map<string, number>> {
+  // An empty window has no bucket range to bind (both binds would be NaN);
+  // the caller still emits `[]`, as API.md documents.
+  if (timestamps.length === 0) return new Map();
   const { results } = await env.DB.prepare(
     'SELECT settlement_date, region, intensity FROM cdeii_daily WHERE settlement_date >= ? AND settlement_date <= ?',
   )

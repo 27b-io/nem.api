@@ -37,8 +37,8 @@ bucket_name = "nem-api-archive"
 #                BACKFILL_CRON in src/backfill.ts; offset so it never lands on
 #                a */5 minute. Drains ~13 months of daily zips in ~a day, then
 #                idles as a standing >2-day gap healer.
-#   37 20 * *  — CDEII emissions refresh (LAB-1698): must stay byte-identical
-#                to CDEII_CRON in src/index.ts. The two CDEII files republish
+#   37 20 * * * — CDEII emissions refresh (LAB-1698): must stay byte-identical
+#                to CDEII_CRON in src/cdeii.ts. The two CDEII files republish
 #                weekly, so daily is generous; pure upserts, so a skipped run
 #                costs nothing.
 [triggers]

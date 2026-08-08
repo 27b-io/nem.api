@@ -212,7 +212,9 @@ export function parseDailyIndex(text: string): { rows: DailyIndexRow[]; malforme
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 
 async function fetchText(filename: string, baseUrl: string): Promise<string> {
-  const res = await fetch(new URL(filename, baseUrl));
+  // Explicit no-store: a refresh must read AEMO's current file, never a
+  // cached body — the filenames are stable across weekly republishes.
+  const res = await fetch(new URL(filename, baseUrl), { cache: 'no-store' });
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${filename}`);
   const declared = Number(res.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > MAX_FILE_BYTES) {

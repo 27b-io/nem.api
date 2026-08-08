@@ -18,8 +18,9 @@ async function get(path: string): Promise<Response> {
 async function gidOf(duid: string): Promise<number> {
   const row = await env.DB.prepare('SELECT MIN(id) AS id FROM generators WHERE duid = ?')
     .bind(duid)
-    .first<{ id: number }>();
-  if (!row) throw new Error(`no generator seeded for DUID ${duid}`);
+    .first<{ id: number | null }>();
+  // MIN() is an aggregate: a missing DUID still yields one row, with id NULL.
+  if (row?.id == null) throw new Error(`no generator seeded for DUID ${duid}`);
   return row.id;
 }
 
