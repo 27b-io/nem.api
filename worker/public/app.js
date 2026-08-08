@@ -24,6 +24,7 @@
  * mandated relief channel): solar #eda100 is 2.17:1 on white; fossil #8f4d0f
  * is 2.44:1 on the dark surface. */
 import { buildStack, orderSeries } from './stacking.js';
+import { bucketLabel, DEFAULT_RANGE, RANGES, rangeQuery } from './ranges.js';
 
 const REGIONS = [
   ['', 'NEM'], ['QLD1', 'QLD'], ['NSW1', 'NSW'],
@@ -44,7 +45,7 @@ const chartEl = $('chart');
  * matching bucket); null altogether when the intensity fetch failed. The
  * overlay is best-effort chrome on top of the fuel view: its failure never
  * blocks the chart. */
-const state = { region: '', payload: null, ordered: [], chart: null, intensity: null, showIntensity: true };
+const state = { region: '', range: DEFAULT_RANGE, payload: null, ordered: [], chart: null, intensity: null, showIntensity: true };
 
 function currentTheme() {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -141,8 +142,10 @@ function renderReadout(cursorIdx) {
   }
   const idx = cursorIdx ?? payload.timestamps.length - 1;
   const ts = payload.timestamps[idx];
+  // Bucket width from the resolution the API says it served, not the one we
+  // asked for — a daily bucket must not claim a 5-minute interval.
   $('readout-time').textContent =
-    `Interval ending ${fmtTime.format(ts * 1e3)} AEST · ${fmtDate.format(ts * 1e3)}`;
+    `${bucketLabel(payload.resolution)} ending ${fmtTime.format(ts * 1e3)} AEST · ${fmtDate.format(ts * 1e3)}`;
 
   let total = 0;
   let sawValue = false;
@@ -241,13 +244,17 @@ let activeLoad = 0;
 
 /* Fetch the intensity series for a region and align it onto the fuel
  * payload's time axis (the two requests can resolve one interval apart at a
- * cache boundary — join on timestamps, never by index). API units are
+ * cache boundary — join on timestamps, never by index). The range rides along
+ * so both endpoints resolve the SAME window and auto-stepped resolution —
+ * period-ending timestamps coincide across resolutions, so a mismatched
+ * request would join wrong-width buckets, not miss. API units are
  * tCO2-e/MWh; ×1000 → the gCO2-e/kWh the dashboard displays. Returns null on
  * any failure: the overlay is best-effort and must never take down the fuel
  * view. */
-async function fetchIntensity(region, timestamps) {
+async function fetchIntensity(region, range, timestamps) {
   try {
-    const res = await fetch('/api/v2/intensity' + (region ? `?region=${encodeURIComponent(region)}` : ''));
+    const res = await fetch(`/api/v2/intensity?${rangeQuery(range)}`
+      + (region ? `&region=${encodeURIComponent(region)}` : ''));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
     // With a region filter the region series equals NEM (= total of matched),
@@ -268,9 +275,16 @@ async function fetchIntensity(region, timestamps) {
   }
 }
 
-async function load(region) {
+async function load(region, range) {
   const loadId = ++activeLoad;
-  const url = '/api/v2/values/aggregate?group_by=fuel'
+  // Selection commits immediately (state, buttons, URL) so a click during an
+  // in-flight fetch composes with THIS selection, and error-Retry retries
+  // what the user actually asked for — only the payload waits on success.
+  state.region = region;
+  state.range = range;
+  syncUrl(region, range);
+  renderFilters();
+  const url = `/api/v2/values/aggregate?group_by=fuel&${rangeQuery(range)}`
     + (region ? `&region=${encodeURIComponent(region)}` : '');
   chartEl.classList.add('opacity-50'); // refetch keeps the previous frame
   chartEl.setAttribute('aria-busy', 'true');
@@ -285,7 +299,6 @@ async function load(region) {
     if (loadId !== activeLoad) return;
     state.payload = payload;
     state.intensity = null;
-    state.region = region;
     $('error-alert').classList.add('hidden');
     render();
 
@@ -294,7 +307,7 @@ async function load(region) {
     // but render() inside the .then can still throw; the .catch keeps that
     // from becoming an unhandled rejection. The loadId check drops stale
     // responses.
-    void fetchIntensity(region, payload.timestamps).then((intensity) => {
+    void fetchIntensity(region, range, payload.timestamps).then((intensity) => {
       if (loadId !== activeLoad) return;
       state.intensity = intensity;
       render();
@@ -311,22 +324,41 @@ async function load(region) {
   }
 }
 
-function renderRegionFilter() {
-  const nav = $('region-filter');
+// Selection lives in the URL (shareable links); defaults stay unset so the
+// boot URL is unchanged. ?theme= and anything else present are preserved.
+function syncUrl(region, range) {
+  const qs = new URLSearchParams(location.search);
+  if (region) qs.set('region', region); else qs.delete('region');
+  if (range !== DEFAULT_RANGE) qs.set('range', range); else qs.delete('range');
+  const search = qs.toString();
+  history.replaceState(null, '', search ? `?${search}` : location.pathname);
+}
+
+/* Region and range are the same control: a daisyUI join group where exactly
+ * one button is active, and picking one refetches with BOTH selections
+ * applied (they compose on the same endpoint). */
+function renderFilter(id, options, selected, pick) {
+  const nav = $(id);
   nav.textContent = '';
-  for (const [value, label] of REGIONS) {
+  for (const { value, label } of options) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn join-item btn-sm' + (value === state.region ? ' btn-active' : '');
-    btn.setAttribute('aria-pressed', String(value === state.region));
+    btn.className = 'btn join-item btn-sm' + (value === selected ? ' btn-active' : '');
+    btn.setAttribute('aria-pressed', String(value === selected));
     btn.textContent = label;
-    btn.addEventListener('click', async () => {
-      if (value === state.region) return;
-      await load(value);
-      renderRegionFilter();
+    btn.addEventListener('click', () => {
+      if (value === selected) return;
+      pick(value); // load() re-renders the filters as it commits the selection
     });
     nav.append(btn);
   }
+}
+
+function renderFilters() {
+  renderFilter('region-filter', REGIONS.map(([value, label]) => ({ value, label })),
+    state.region, (value) => load(value, state.range));
+  renderFilter('range-filter', RANGES.map(({ key, label }) => ({ value: key, label })),
+    state.range, (value) => load(state.region, value));
 }
 
 // Theme toggle: explicit choice persists; OS changes apply only while the
@@ -362,7 +394,7 @@ new ResizeObserver(() => {
   }
 }).observe(chartEl);
 
-$('error-retry').addEventListener('click', () => load(state.region));
+$('error-retry').addEventListener('click', () => load(state.region, state.range));
 
 // Overlay toggle re-renders the chart only — the stat and readout keep
 // reporting intensity either way (they are the value relief channel).
@@ -372,5 +404,13 @@ $('intensity-toggle').addEventListener('change', () => {
 });
 
 initTheme();
-renderRegionFilter();
-load('');
+// Restore selection from the URL (shareable links); unknown values fall back
+// to the defaults, so the bare URL still boots identical to before.
+{
+  const qs = new URLSearchParams(location.search);
+  const region = qs.get('region');
+  const range = qs.get('range');
+  if (REGIONS.some(([value]) => value === region)) state.region = region;
+  if (RANGES.some(({ key }) => key === range)) state.range = range;
+}
+load(state.region, state.range); // renders the filters as it commits
