@@ -39,8 +39,11 @@ if (!res.ok) {
   process.exit(2);
 }
 const body = await res.json();
-if (!body.series?.[0]?.official) {
-  console.error('no `official` field in the response — is cdeii_daily populated? (run the CDEII refresh)');
+if (body.series?.[0]?.official === undefined) {
+  // The field is present on every daily response, so its absence means the
+  // response was not daily — not that cdeii_daily is empty (that shows up as
+  // a column of nulls and is caught by the compared === 0 gate below).
+  console.error(`expected a daily response, got resolution=${body.resolution} — widen --days`);
   process.exit(2);
 }
 

@@ -41,6 +41,7 @@ import {
   resolveOrder,
   resolveResolution,
   resolveTimeWindow,
+  servedFromRollups,
 } from './api';
 
 export const DISPATCH_INTERVAL_SECONDS = 300;
@@ -196,24 +197,26 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
 
       const resolution = resolveResolution(params, window, nowSeconds);
       parts.push(`res=${resolution}`);
-      const { limit, offset } = resolveLimit(params);
-      parts.push(`lim=${limit}`, `off=${offset}`);
-      // intensity reads neither `sort` nor the generator filters (it is
-      // defined per region and always returns all of them), so for that route
-      // they are unrecognised params and stay out of the key like any other.
+      // intensity reads none of limit/offset/sort/generator-filters — it is
+      // defined per region, always returns every region, and is bounded by its
+      // resolution floor instead. For that route these are unrecognised params
+      // and stay out of the key like any other, so `?limit=5` cannot mint a
+      // second entry for a byte-identical response.
       if (route !== '/api/v2/intensity') {
-        parts.push(`ord=${resolveOrder(params)}`, ...filterParts(params));
+        const { limit, offset } = resolveLimit(params);
+        parts.push(`lim=${limit}`, `off=${offset}`, `ord=${resolveOrder(params)}`, ...filterParts(params));
       }
 
       // Upper bound of the data the window can see (t = exact matches only).
       let upper =
         window.exact !== undefined && window.end !== undefined ? Math.min(window.exact, window.end) : (window.exact ?? window.end);
-      // Rollup-served responses (LAB-1696 aggregate, LAB-1698 intensity;
-      // resolution 3600/86400, no exact) return the FULL bucket straddling
-      // `time_end`, so the response keeps changing until that bucket completes
-      // — the closed test must clear the bucket end, not just `time_end`.
-      const rollupServed = route === '/api/v2/values/aggregate' || route === '/api/v2/intensity';
-      if (upper !== undefined && rollupServed && window.exact === undefined && resolution >= 3600) {
+      // Rollup-served responses (LAB-1696 aggregate, LAB-1698 intensity)
+      // return the FULL bucket straddling `time_end`, so the response keeps
+      // changing until that bucket completes — the closed test must clear the
+      // bucket end, not just `time_end`. `/values` is raw at every resolution
+      // and clips to the window, so it is excluded by route, but the ROUTING
+      // condition itself comes from api.ts so it cannot drift here.
+      if (upper !== undefined && route !== '/api/v2/values' && servedFromRollups(window, resolution)) {
         upper = nemBucket(upper, resolution);
       }
       // Closed = every sample the response can ever reflect has been

@@ -32,16 +32,29 @@ const REGIONS = [
 
 const TZ = 'Australia/Brisbane'; // NEM market time: AEST, UTC+10, never DST (not Sydney)
 const fmtMW = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
-// The API publishes tCO2-e/MWh; gCO2-e/kWh is the same number x1000 and is
-// what people actually quote, so the display unit converts and the axis says so.
-const fmtIntensity = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
+// The API publishes tCO2-e/MWh; gCO2-e/kWh is the same number x1000 and is what
+// people actually quote, so every intensity display site multiplies and every
+// label says gCO2-e/kWh.
+const G_PER_KWH = 1000;
 const fmtTime = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
 const fmtDate = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short' });
 
 const $ = (id) => document.getElementById(id);
 const chartEl = $('chart');
 
-const state = { region: '', payload: null, intensity: null, showIntensity: true, ordered: [], chart: null };
+/* `overlay` and `overlayInk` are derived once per render in renderChart and
+ * read by renderReadout, which runs on every mousemove — recomputing the
+ * alignment Maps and a getComputedStyle() per pointer event was measurable. */
+const state = {
+  region: '',
+  payload: null,
+  intensity: null,
+  showIntensity: true,
+  ordered: [],
+  overlay: null,
+  overlayInk: '',
+  chart: null,
+};
 
 /* Carbon intensity (LAB-1698) for the selected region, aligned to the fuel
  * payload's buckets by TIMESTAMP rather than by index: both endpoints read the
@@ -85,6 +98,8 @@ function renderChart() {
   // last, so it draws on top of the stack and cannot disturb the band indices
   // buildStack computed — bands only ever reference series already in place.
   const intensityValues = state.showIntensity ? intensityForRegion() : null;
+  state.overlay = intensityValues;
+  state.overlayInk = tokens.intensityInk;
 
   const width = chartEl.clientWidth || 640;
   const height = Math.max(280, Math.min(420, Math.round(width * 0.45)));
@@ -96,7 +111,7 @@ function renderChart() {
 
   const intensityAxes = [];
   if (intensityValues) {
-    const gPerKwh = intensityValues.map((v) => (v == null ? null : v * 1000));
+    const gPerKwh = intensityValues.map((v) => (v == null ? null : v * G_PER_KWH));
     // Drawn as a CASING (wide surface-colour stroke) under the ink line. No
     // single ink clears 3:1 against every fuel fill in both themes — the
     // palette deliberately spans a lightness band in both directions, so any
@@ -123,7 +138,7 @@ function renderChart() {
       size: 62,
       // The left axis already rules the plot; a second grid would be noise.
       grid: { show: false },
-      values: (u, vals) => vals.map((v) => fmtIntensity.format(v)),
+      values: (u, vals) => vals.map((v) => fmtMW.format(v)),
     });
   }
 
@@ -203,21 +218,21 @@ function renderReadout(cursorIdx) {
   // reachable without hovering, which is what relieves the two sub-3:1 fills.
   // It follows the overlay toggle — a line swatch pointing at a line that is
   // not drawn is worse than no row, and the headline stat carries the number
-  // regardless.
-  const intensityValues = state.showIntensity ? intensityForRegion() : null;
-  if (intensityValues) {
+  // regardless. Both inputs were derived in renderChart; this runs per
+  // mousemove.
+  if (state.overlay) {
     const row = document.createElement('div');
     row.className = 'flex items-center gap-2 font-semibold';
     const line = document.createElement('span');
     line.className = 'inline-block h-0.5 w-3 shrink-0';
-    line.style.backgroundColor = chartTokens().intensityInk;
+    line.style.backgroundColor = state.overlayInk;
     const name = document.createElement('span');
     name.className = 'truncate';
     name.textContent = 'gCO₂-e/kWh';
     const val = document.createElement('span');
     val.className = 'ms-auto tabular-nums';
-    const v = intensityValues[idx];
-    val.textContent = v == null ? '—' : fmtIntensity.format(v * 1000);
+    const v = state.overlay[idx];
+    val.textContent = v == null ? '—' : fmtMW.format(v * G_PER_KWH);
     row.append(line, name, val);
     readout.append(row);
   }
@@ -229,17 +244,25 @@ function renderReadout(cursorIdx) {
 function renderHeroIntensity() {
   const el = $('hero-intensity');
   const series = state.intensity?.series.find((s) => s.key === (state.region || 'NEM'));
-  const latest = series?.values.reduce((acc, v) => (v == null ? acc : v), null) ?? null;
-  el.textContent = latest == null ? '—' : `${fmtIntensity.format(latest * 1000)} g`;
-  // Coverage is part of the number's meaning, not a footnote: say so on hover.
+  // One scan: the value and the coverage MUST come from the same bucket, or
+  // the tooltip attributes a coverage figure to a reading it doesn't describe.
   const i = series ? series.values.findLastIndex((v) => v != null) : -1;
-  const coverage = i >= 0 ? series.coverage[i] : null;
-  el.title =
-    latest == null
-      ? 'No emission factors matched this window — see the method note below.'
-      : `gCO₂-e per kWh, estimated. ${
-          coverage == null ? '' : `${(coverage * 100).toFixed(1)}% of dispatched MW carried a published factor. `
-        }Reads a few percent high (as-generated vs sent-out).`;
+  el.textContent = i < 0 ? '—' : `${fmtMW.format(series.values[i] * G_PER_KWH)} g`;
+  if (i >= 0) {
+    // Coverage is part of the number's meaning, not a footnote: say so on hover.
+    const coverage = series.coverage[i];
+    el.title =
+      `gCO₂-e per kWh, estimated. ${
+        coverage == null ? '' : `${(coverage * 100).toFixed(1)}% of dispatched MW carried a published factor. `
+      }Reads a few percent high (as-generated vs sent-out).`;
+  } else {
+    // A failed fetch is not a statement about emission factors — saying so
+    // would put a false methodology claim on a public page.
+    el.title =
+      state.intensity === null
+        ? 'Carbon intensity is unavailable right now.'
+        : 'No generation with a published emission factor in this window.';
+  }
 }
 
 function renderHero() {

@@ -49,14 +49,10 @@ describe('splitCsvLine', () => {
 });
 
 describe('parseEmissionFactors', () => {
-  it("does not shift columns on a station name containing a comma", () => {
+  it('does not shift columns on a station name containing a comma', () => {
     const { factors } = parseEmissionFactors(FACTORS_CSV);
     // The naive split-on-comma parse would read GENSETID here and NaN the factor.
-    expect(factors.find((f) => f.duid === 'HAUGHT11')).toEqual({
-      duid: 'HAUGHT11',
-      factor: 0,
-      dataSource: 'ISP2024',
-    });
+    expect(factors.find((f) => f.duid === 'HAUGHT11')).toEqual({ duid: 'HAUGHT11', factor: 0 });
   });
 
   it('collapses a DUID repeated across gensets and skips malformed rows', () => {
@@ -66,12 +62,33 @@ describe('parseEmissionFactors', () => {
     expect(malformed).toBe(2); // blank DUID, non-numeric factor
   });
 
-  it('is fatal when one DUID carries two different factors — DUID would stop being a safe key', () => {
-    const conflicting = FACTORS_CSV.replace(
-      'MURRAY,MURRAY2,NSW1,0.00000000',
-      'MURRAY,MURRAY2,NSW1,0.70000000',
+  it('drops — never guesses — a DUID listed with two different factors', () => {
+    const conflicting = FACTORS_CSV.replace('MURRAY,MURRAY2,NSW1,0.00000000', 'MURRAY,MURRAY2,NSW1,0.70000000');
+    const { factors, malformed } = parseEmissionFactors(conflicting);
+    // Neither factor is trustworthy, so MURRAY simply has none: the intensity
+    // endpoint then excludes it and counts it against `coverage`, which is the
+    // same honest treatment any unfactored unit gets. Throwing here would
+    // block the official-index write too, every day, until AEMO relented.
+    expect(factors.map((f) => f.duid).sort()).toEqual(['BW01', 'HAUGHT11']);
+    expect(malformed).toBe(3); // blank DUID, non-numeric factor, conflicted DUID
+  });
+
+  it('reads the table whose columns match, and only D rows of that table version', () => {
+    // AEMO's normal schema migration publishes both versions side by side. A
+    // v2 row parsed with v1 column positions would upsert a silently shifted
+    // factor into a public series.
+    const twoVersions = FACTORS_CSV.replace(
+      'C,"END OF REPORT",7',
+      [
+        'I,CO2EII,PUBLISHING,2,STATIONNAME,DUID,GENSETID,REGIONID,CO2E_ENERGY_SOURCE,CO2E_EMISSIONS_FACTOR,CO2E_DATA_SOURCE',
+        'D,CO2EII,PUBLISHING,2,"Future Station",FUTURE1,FUTURE1,NSW1,Wind,0.12000000,ISP2026',
+        'C,"END OF REPORT",9',
+      ].join('\n'),
     );
-    expect(() => parseEmissionFactors(conflicting)).toThrow(/two different factors/);
+    // Column order differs between the versions, so picking the wrong header
+    // would read "Wind" as the factor and NaN it.
+    const { factors } = parseEmissionFactors(twoVersions);
+    expect(factors.map((f) => f.duid).sort()).toEqual(['BW01', 'HAUGHT11', 'MURRAY']);
   });
 
   it('rejects an implausible factor rather than publishing it', () => {
@@ -81,7 +98,7 @@ describe('parseEmissionFactors', () => {
 
   it('is fatal on a renamed column instead of silently reading the wrong one', () => {
     expect(() => parseEmissionFactors(FACTORS_CSV.replace('CO2E_EMISSIONS_FACTOR', 'CO2E_FACTOR'))).toThrow(
-      /missing required column "CO2E_EMISSIONS_FACTOR"/,
+      /no I,CO2EII,PUBLISHING table declaring all of DUID, CO2E_EMISSIONS_FACTOR/,
     );
   });
 });
@@ -151,10 +168,10 @@ describe('refreshCdeii', () => {
     await refreshWithoutFloors();
     await refreshWithoutFloors();
 
-    const factor = await env.DB.prepare('SELECT factor, data_source FROM emission_factors WHERE duid = ?')
+    const factor = await env.DB.prepare('SELECT factor FROM emission_factors WHERE duid = ?')
       .bind('BW01')
-      .first<{ factor: number; data_source: string }>();
-    expect(factor).toEqual({ factor: 0.91, data_source: 'ISP2024' });
+      .first<{ factor: number }>();
+    expect(factor).toEqual({ factor: 0.91 });
 
     const daily = await env.DB.prepare('SELECT intensity FROM cdeii_daily WHERE settlement_date = ? AND region = ?')
       .bind(AUG1_AEST, 'NSW1')
@@ -182,5 +199,24 @@ describe('refreshCdeii', () => {
 
     const n = await env.DB.prepare('SELECT count(*) AS n FROM emission_factors').first<{ n: number }>();
     expect(n?.n).toBe(0);
+  });
+
+  it('writes factors and the official index in one transaction', async () => {
+    // They are the estimate and the line it is reconciled against: publishing
+    // one against a stale copy of the other makes the harness report a drift
+    // that is ours, not AEMO's. A malformed daily file must take the factor
+    // write down with it.
+    await refreshWithoutFloors();
+    await env.DB.prepare('DELETE FROM emission_factors').run();
+    served.set(SUMMARY_FILE, { status: 200, body: 'C,junk\n' });
+
+    await expect(refreshCdeii(env, CDEII_BASE_URL)).rejects.toThrow();
+    const n = await env.DB.prepare('SELECT count(*) AS n FROM emission_factors').first<{ n: number }>();
+    expect(n?.n).toBe(0); // factors were NOT written despite parsing fine
+  });
+
+  it('refuses an oversized upstream body rather than OOMing the isolate', async () => {
+    served.set(FACTORS_FILE, { status: 200, body: 'x'.repeat(9 * 1024 * 1024) });
+    await expect(refreshCdeii(env, CDEII_BASE_URL)).rejects.toThrow(/refusing to parse/);
   });
 });

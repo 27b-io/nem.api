@@ -16,8 +16,7 @@
 -- joins generators.duid with zero name matching.
 CREATE TABLE emission_factors (
     duid TEXT PRIMARY KEY,
-    factor REAL NOT NULL,   -- tCO2-e per MWh SENT OUT (not as-generated — see worker/API.md)
-    data_source TEXT        -- CO2E_DATA_SOURCE provenance: 'ISP2022' / 'ISP2024' / 'NGA 2024' / ...
+    factor REAL NOT NULL    -- tCO2-e per MWh SENT OUT (not as-generated — see worker/API.md)
 ) WITHOUT ROWID;
 
 -- CO2EII_SUMMARY_RESULTS.CSV: AEMO's OFFICIAL daily intensity index published
@@ -30,6 +29,13 @@ CREATE TABLE emission_factors (
 -- are period-ENDING, so the bucket covering this row is settlement_date +
 -- 86400 — translated in one place (CDEII_DAY_SECONDS, src/api.ts) rather than
 -- baked into storage, so the stored value stays auditable against the source.
+--
+-- Only `intensity` is read today; sent_out_energy and emissions are kept
+-- anyway, and deliberately. The CURRENT file is a ROLLING ~7-month window, so
+-- a day that rolls off before we captured its inputs is not re-derivable from
+-- anywhere we ingest — unlike the factor table, which is current-state and
+-- re-fetched daily. Two REAL columns on six rows a day is the cheapest
+-- insurance in this schema. Do not "clean these up" as unused.
 CREATE TABLE cdeii_daily (
     settlement_date INTEGER NOT NULL,
     region TEXT NOT NULL,           -- 'NEM' plus the five NEM region ids

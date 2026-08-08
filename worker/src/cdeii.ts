@@ -45,13 +45,12 @@ const MIN_DAILY_ROWS = 180;
 const MAX_PLAUSIBLE_FACTOR = 5;
 
 // D1 caps a statement at 100 bound parameters.
-const FACTOR_CHUNK_ROWS = 33; // 3 params each
+const FACTOR_CHUNK_ROWS = 50; // 2 params each
 const DAILY_CHUNK_ROWS = 20; // 5 params each
 
 export interface EmissionFactor {
   duid: string;
   factor: number;
-  dataSource: string;
 }
 
 export interface DailyIndexRow {
@@ -92,38 +91,60 @@ export function splitCsvLine(line: string): string[] {
 
 /**
  * Locate the CDEII table declaring every required column and return its data
- * rows plus a name→index map. Throws when the header is missing or a column
- * was renamed — the caller aborts the refresh, leaving existing rows intact.
+ * rows plus a name→index map. Throws when no such header exists — the caller
+ * aborts the refresh, leaving existing rows intact.
+ *
+ * Both CDEII files declare `I,CO2EII,PUBLISHING,<version>` and differ only in
+ * their column list, so the table is picked by matching the COLUMNS (not just
+ * that prefix), and its data rows are then filtered on the matched header's
+ * VERSION as well. AEMO's normal way to change a schema is to publish both
+ * versions for a while; taking the first header and every D row would parse
+ * the new rows with the old column positions and upsert silently shifted
+ * numbers into a public series.
  */
 export function parseCdeiiTable(text: string, required: string[]): { rows: string[][]; column: Map<string, number> } {
   const lines = text.split(/\r?\n/);
-  const header = lines.find((l) => l.startsWith(`I,${TABLE_PREFIX}`));
-  if (header === undefined) throw new Error('CDEII file has no I,CO2EII,PUBLISHING header row');
-
-  const names = splitCsvLine(header);
-  const column = new Map<string, number>();
-  for (const name of required) {
-    const index = names.indexOf(name);
-    if (index < 0) throw new Error(`CDEII file is missing required column "${name}" — AEMO renamed it?`);
-    column.set(name, index);
+  let header: string[] | undefined;
+  for (const line of lines) {
+    if (!line.startsWith(`I,${TABLE_PREFIX}`)) continue;
+    const names = splitCsvLine(line);
+    if (required.every((name) => names.includes(name))) {
+      header = names;
+      break;
+    }
+  }
+  if (header === undefined) {
+    throw new Error(
+      `CDEII file has no I,CO2EII,PUBLISHING table declaring all of ${required.join(', ')} — AEMO renamed a column?`,
+    );
   }
 
-  return { rows: lines.filter((l) => l.startsWith(`D,${TABLE_PREFIX}`)).map(splitCsvLine), column };
+  const column = new Map(required.map((name) => [name, header.indexOf(name)]));
+  // Field 3 of an MMS I/D row is the table version the row conforms to.
+  const dataPrefix = `D,${TABLE_PREFIX}${header[3]},`;
+  return { rows: lines.filter((l) => l.startsWith(dataPrefix)).map(splitCsvLine), column };
 }
 
 /**
  * CO2EII_AVAILABLE_GENERATORS.CSV → one factor per DUID. The file is
- * per-GENSETID, so multi-genset DUIDs repeat; a repeat carrying a DIFFERENT
- * factor means DUID is no longer a safe key for this table, which is fatal
- * rather than last-write-wins.
+ * per-GENSETID, so multi-genset DUIDs repeat (43 of 573 do today) — always
+ * with the same factor.
+ *
+ * A repeat carrying a DIFFERENT factor means DUID is no longer a safe key for
+ * this table, so that DUID is DROPPED, not guessed at with last-write-wins:
+ * it then has no factor, which the intensity endpoint already handles honestly
+ * by excluding it and counting it against `coverage`. Dropping rather than
+ * throwing matters because the same file is re-fetched every day — a throw
+ * would block the official-index write too, every day, until AEMO changed the
+ * file back.
  */
 export function parseEmissionFactors(text: string): { factors: EmissionFactor[]; malformed: number } {
-  const { rows, column } = parseCdeiiTable(text, ['DUID', 'CO2E_EMISSIONS_FACTOR', 'CO2E_DATA_SOURCE']);
+  const { rows, column } = parseCdeiiTable(text, ['DUID', 'CO2E_EMISSIONS_FACTOR']);
   const duidCol = column.get('DUID') as number;
   const factorCol = column.get('CO2E_EMISSIONS_FACTOR') as number;
-  const sourceCol = column.get('CO2E_DATA_SOURCE') as number;
 
   const byDuid = new Map<string, EmissionFactor>();
+  const conflicted = new Set<string>();
   let malformed = 0;
   for (const row of rows) {
     const duid = (row[duidCol] ?? '').trim();
@@ -134,17 +155,18 @@ export function parseEmissionFactors(text: string): { factors: EmissionFactor[];
     }
     const existing = byDuid.get(duid);
     if (existing !== undefined) {
-      if (existing.factor !== factor) {
-        throw new Error(
-          `CDEII factor file lists DUID ${duid} with two different factors ` +
-            `(${existing.factor}, ${factor}) — DUID is no longer a safe key for this table`,
-        );
-      }
+      if (existing.factor !== factor) conflicted.add(duid);
       continue;
     }
-    byDuid.set(duid, { duid, factor, dataSource: (row[sourceCol] ?? '').trim() });
+    byDuid.set(duid, { duid, factor });
   }
-  return { factors: [...byDuid.values()], malformed };
+  if (conflicted.size > 0) {
+    console.warn(
+      `cdeii: dropped ${conflicted.size} DUID(s) listed with conflicting factors: ${[...conflicted].sort().join(', ')}`,
+    );
+    for (const duid of conflicted) byDuid.delete(duid);
+  }
+  return { factors: [...byDuid.values()], malformed: malformed + conflicted.size };
 }
 
 /** CO2EII_SUMMARY_RESULTS.CSV → AEMO's official daily index rows. */
@@ -183,31 +205,48 @@ export function parseDailyIndex(text: string): { rows: DailyIndexRow[]; malforme
   return { rows: parsed, malformed };
 }
 
+// Both files are well under 200 KB today. The ceiling is not about AEMO
+// misbehaving: parsing holds the split lines, the row arrays and the map at
+// once (~4x the body), so an unbounded body is an isolate OOM on a scheduled
+// handler that has no other failure mode.
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
+
 async function fetchText(filename: string, baseUrl: string): Promise<string> {
   const res = await fetch(new URL(filename, baseUrl));
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${filename}`);
-  return res.text();
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_FILE_BYTES) {
+    throw new Error(`${filename} is ${declared} bytes (> ${MAX_FILE_BYTES}) — refusing to parse`);
+  }
+  const text = await res.text();
+  if (text.length > MAX_FILE_BYTES) {
+    throw new Error(`${filename} decoded to ${text.length} chars (> ${MAX_FILE_BYTES}) — refusing to parse`);
+  }
+  return text;
 }
 
-/** Chunked upsert in one D1 batch (= one transaction), like src/ingest.ts. */
-async function upsertChunked(
+/** Chunked upsert statements, split to respect D1's 100-bound-param cap. */
+function upsertStatements(
   db: D1Database,
   sqlFor: (rowCount: number) => string,
   rows: unknown[][],
   chunkRows: number,
-): Promise<void> {
+): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [];
   for (let i = 0; i < rows.length; i += chunkRows) {
     const chunk = rows.slice(i, i + chunkRows);
     statements.push(db.prepare(sqlFor(chunk.length)).bind(...chunk.flat()));
   }
-  await db.batch(statements);
+  return statements;
 }
 
 /**
- * Fetch both CDEII files and upsert them. Both files are parsed and
- * sanity-checked BEFORE either write, so a half-published pair cannot leave
- * factors and the official index disagreeing about what AEMO currently says.
+ * Fetch both CDEII files and upsert them. Both are parsed and sanity-checked
+ * before anything is written, and both writes go in ONE d1 batch (= one
+ * transaction) — so factors and the official index they are reconciled against
+ * can never end up describing different publications of the file. Two batches
+ * would leave exactly that state behind on a mid-write failure, and the
+ * reconciliation harness would then report a drift that is ours, not AEMO's.
  */
 export async function refreshCdeii(env: Env, baseUrl: string = CDEII_BASE_URL): Promise<void> {
   const [factorsText, summaryText] = await Promise.all([
@@ -227,26 +266,27 @@ export async function refreshCdeii(env: Env, baseUrl: string = CDEII_BASE_URL): 
     console.warn(`cdeii: skipped ${badFactors} malformed factor row(s), ${badDaily} malformed daily row(s)`);
   }
 
-  await upsertChunked(
-    env.DB,
-    (n) =>
-      'INSERT INTO emission_factors (duid, factor, data_source) VALUES ' +
-      Array.from({ length: n }, () => '(?,?,?)').join(',') +
-      ' ON CONFLICT(duid) DO UPDATE SET factor = excluded.factor, data_source = excluded.data_source',
-    factors.map((f) => [f.duid, f.factor, f.dataSource]),
-    FACTOR_CHUNK_ROWS,
-  );
-
-  await upsertChunked(
-    env.DB,
-    (n) =>
-      'INSERT INTO cdeii_daily (settlement_date, region, sent_out_energy, emissions, intensity) VALUES ' +
-      Array.from({ length: n }, () => '(?,?,?,?,?)').join(',') +
-      ' ON CONFLICT(settlement_date, region) DO UPDATE SET ' +
-      'sent_out_energy = excluded.sent_out_energy, emissions = excluded.emissions, intensity = excluded.intensity',
-    daily.map((r) => [r.settlementDate, r.region, r.sentOutEnergy, r.emissions, r.intensity]),
-    DAILY_CHUNK_ROWS,
-  );
+  await env.DB.batch([
+    ...upsertStatements(
+      env.DB,
+      (n) =>
+        'INSERT INTO emission_factors (duid, factor) VALUES ' +
+        Array.from({ length: n }, () => '(?,?)').join(',') +
+        ' ON CONFLICT(duid) DO UPDATE SET factor = excluded.factor',
+      factors.map((f) => [f.duid, f.factor]),
+      FACTOR_CHUNK_ROWS,
+    ),
+    ...upsertStatements(
+      env.DB,
+      (n) =>
+        'INSERT INTO cdeii_daily (settlement_date, region, sent_out_energy, emissions, intensity) VALUES ' +
+        Array.from({ length: n }, () => '(?,?,?,?,?)').join(',') +
+        ' ON CONFLICT(settlement_date, region) DO UPDATE SET ' +
+        'sent_out_energy = excluded.sent_out_energy, emissions = excluded.emissions, intensity = excluded.intensity',
+      daily.map((r) => [r.settlementDate, r.region, r.sentOutEnergy, r.emissions, r.intensity]),
+      DAILY_CHUNK_ROWS,
+    ),
+  ]);
 
   console.log(`cdeii: refreshed ${factors.length} emission factor(s), ${daily.length} official daily index row(s)`);
 }

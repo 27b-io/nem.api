@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { BACKFILL_CRON } from '../src/backfill';
+import { CDEII_CRON } from '../src/cdeii';
 import * as entrypoint from '../src/index';
+import wranglerToml from '../wrangler.toml?raw';
 
 // Regression guard for a whole class of "the Worker will not boot" errors that
 // no other test in this suite can see: workerd reads every NAMED export of the
@@ -22,5 +25,19 @@ describe('worker entrypoint', () => {
   it('exposes both handlers workerd will look for', () => {
     expect(typeof entrypoint.default.fetch).toBe('function');
     expect(typeof entrypoint.default.scheduled).toBe('function');
+  });
+});
+
+// The scheduled handler dispatches on EXACT cron-string equality and falls
+// through to the ingest for anything it doesn't recognise. That makes drift
+// between a constant and wrangler.toml completely silent: the schedule fires,
+// an extra (successful) ingest runs, and the job that was supposed to run
+// never does — no failed invocation, no log, just data quietly going stale.
+describe('cron schedules', () => {
+  it('are declared in wrangler.toml exactly as the dispatcher expects', () => {
+    const crons = /crons\s*=\s*\[([^\]]*)\]/.exec(wranglerToml)?.[1] ?? '';
+    for (const cron of [BACKFILL_CRON, CDEII_CRON]) {
+      expect(crons, `wrangler.toml crons must contain "${cron}"`).toContain(`"${cron}"`);
+    }
   });
 });

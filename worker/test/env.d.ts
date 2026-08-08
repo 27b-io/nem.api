@@ -8,3 +8,10 @@ declare namespace Cloudflare {
     TEST_MIGRATIONS: import('cloudflare:test').D1Migration[];
   }
 }
+
+// Vite's `?raw` suffix — used by test/index.spec.ts to assert wrangler.toml's
+// cron entries against the constants the scheduled handler dispatches on.
+declare module '*?raw' {
+  const content: string;
+  export default content;
+}

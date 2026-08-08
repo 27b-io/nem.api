@@ -202,7 +202,6 @@ to the `gCO2-e/kWh` most consumers expect: multiply by 1000.
   "end": 1784988000,
   "resolution": 86400,
   "unit": "tCO2-e/MWh",
-  "truncated": false,
   "timestamps": [1784988000],
   "series": [
     // NEM first, then regions ascending.
@@ -219,16 +218,33 @@ to the `gCO2-e/kWh` most consumers expect: multiply by 1000.
   published factor (see *Coverage* below). `null` when there was no
   generation at all.
 - `official[i]` — AEMO's own published daily index for the same region-day,
-  **present only at `resolution=86400`** (it does not exist at any finer
-  grain). `null` where AEMO has not published that day yet — the file
-  republishes weekly, so the last few days are normally null.
+  **present exactly when the response is daily** — i.e. `resolution=86400`
+  *and* whole-bucket (see below); an exact `time=` lookup is neither, whatever
+  resolution it carries. When present it is always a full-length array (an
+  empty window gives `[]`, never a missing field). `null` where AEMO has not
+  published that day yet — the file republishes weekly, so the most recent
+  days are normally null.
 
-Accepts the same time window and `resolution` parameters as `values`, plus
-`limit`/`offset`. It does **not** accept the generator filters or `sort`:
-intensity is defined per region and always returns every region, and the
-emissions of an arbitrary fuel subset over the output of that same subset is
-a confidently wrong number, not a useful one. Those params are ignored (and,
-like any unrecognised param, do not affect the cache key).
+Accepts the same time-window parameters as `values`. It does **not** accept
+`limit`, `offset`, `sort`, or the generator filters: intensity is defined per
+region and always returns every region (≤6 series), the emissions of an
+arbitrary fuel subset over the output of that same subset is a confidently
+wrong number, and paging a ratio series is how you get a NEM figure summed
+over half its regions. Those params are ignored, and — like any unrecognised
+param — do not affect the cache key.
+
+**Bucket edges.** At `resolution` `3600`/`86400` this endpoint is served from
+the same pre-aggregated rollups as `values/aggregate` (LAB-1696), with the
+same visible consequence: **a bucket straddling `time_start`/`time_end`
+reports the whole bucket**, not just the in-window part. `300`/`1800` and
+exact `time=` read raw rows and clip to the window.
+
+**`resolution` has a floor here.** Unlike `values` and `values/aggregate`,
+this endpoint rejects a resolution finer than the one it would auto-pick for
+the window (`?months=13&resolution=300` → 400). The per-generator grouping
+intensity needs cannot be served at 5-minute grain across a year, and
+returning a 500 instead of saying so would be worse. Omit `resolution` and
+you always get a servable one.
 
 ### How it is computed
 
@@ -246,9 +262,11 @@ not weigh the same as a loaded New South Wales.
 
 Factors come from AEMO's CDEII report
 ([`CO2EII_AVAILABLE_GENERATORS.CSV`](https://nemweb.com.au/Reports/Current/CDEII/),
-one per DUID, provenance `ISP2022` / `ISP2024` / `NGA`), refreshed daily and
-joined on DUID — no name matching. `MW` is the dispatch SCADA already behind
-`/api/v2/values`.
+one per DUID, derived by AEMO from ISP/NGA data), refreshed daily and joined
+on DUID — no name matching. `MW` is the dispatch SCADA already behind
+`/api/v2/values`. A DUID that AEMO ever lists with two *different* factors is
+dropped rather than guessed at, and then shows up in `coverage` like any
+other unfactored unit.
 
 **Negative MW.** A generator's *net* output over a bucket is clamped at zero,
 so a unit that is a net consumer in that bucket — a charging battery, a pump
@@ -259,6 +277,14 @@ coarser resolutions it is the per-generator net over the bucket, so a battery
 that charges more than it discharges within one hour drops out of that hour
 entirely. Leaving charging in the denominator would shrink it and inflate
 intensity — the wrong direction, and worst exactly when the grid is cleanest.
+
+Clamping the bucket *net* rather than each interval is a deliberate
+trade-off: per-interval clamping would be marginally more accurate (it would
+still count a battery's discharge intervals inside a net-charging hour), but
+it is not computable from the rollup tables, so it would make `resolution=1800`
+and `resolution=3600` report different numbers for the same hour with nothing
+in the response to explain why. One number per bucket, however it was served,
+is the more useful contract.
 
 **Coverage.** Generation from a DUID with *no* published factor is excluded
 from both halves of the ratio and disclosed in `coverage`. It is deliberately

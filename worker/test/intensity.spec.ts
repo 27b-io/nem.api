@@ -33,7 +33,6 @@ interface IntensityBody {
   end: number | null;
   resolution: number;
   unit: string;
-  truncated: boolean;
   timestamps: number[];
   series: Array<{ key: string; values: (number | null)[]; coverage: (number | null)[]; official?: (number | null)[] }>;
 }
@@ -57,9 +56,7 @@ async function seed(rows: Array<{ scrapeTime: number; generatorId: number; value
 
 async function setFactors(entries: Array<[duid: string, factor: number]>): Promise<void> {
   for (const [duid, factor] of entries) {
-    await env.DB.prepare("INSERT INTO emission_factors (duid, factor, data_source) VALUES (?, ?, 'TEST')")
-      .bind(duid, factor)
-      .run();
+    await env.DB.prepare('INSERT INTO emission_factors (duid, factor) VALUES (?, ?)').bind(duid, factor).run();
   }
 }
 
@@ -272,6 +269,68 @@ describe('/api/v2/intensity', () => {
   it('rejects malformed parameters instead of silently coercing them', async () => {
     expect((await get('/api/v2/intensity?resolution=77')).status).toBe(400);
     expect((await get('/api/v2/intensity?hours=nope')).status).toBe(400);
+  });
+
+  it('refuses a resolution too fine for the window instead of dying on it', async () => {
+    // The raw path groups by (bucket, generator); `resolution=300&months=13`
+    // is the SQLITE_NOMEM shape LAB-1696 exists to avoid, and it is reachable
+    // unauthenticated with a 100-byte request. Refusing also bounds the
+    // response, which is why this route needs no limit/offset.
+    const tooFine = await get('/api/v2/intensity?months=13&resolution=300');
+    expect(tooFine.status).toBe(400);
+    expect((await tooFine.json<{ error: string }>()).error).toMatch(/too fine for this window/);
+
+    // Coarser than the auto-pick is always fine.
+    expect((await get('/api/v2/intensity?months=13&resolution=86400')).status).toBe(200);
+    // …and so is the auto-pick itself, which is what the dashboard uses.
+    expect((await get('/api/v2/intensity?hours=24')).status).toBe(200);
+  });
+
+  it('never returns a NEM value computed over a subset of regions', async () => {
+    // Regression: this route used to accept limit/offset applied to the flat
+    // (bucket, region) rows, so a cut mid-bucket published a "NEM" intensity
+    // summed over whichever regions survived — 2x wrong, flagged only by a
+    // generic `truncated`. limit/offset are gone; they must stay ignored.
+    await setFactors([
+      ['BW01', 1],
+      ['BAPS', 0],
+    ]);
+    await seed([
+      { scrapeTime: T0 + 300, generatorId: bw01, value: 100 },
+      { scrapeTime: T0 + 300, generatorId: baps, value: 100 },
+    ]);
+
+    const full = await intensity(`time=${T0 + 300}`);
+    const cut = await intensity(`time=${T0 + 300}&limit=1&offset=1`);
+    expect(seriesOf(full, 'NEM').values).toEqual([0.5]);
+    expect(cut).toEqual(full);
+  });
+
+  it('attaches the official daily index only when the buckets really are whole days', async () => {
+    await setFactors([['BW01', 0.9]]);
+    await seed([{ scrapeTime: T0 + 300, generatorId: bw01, value: 100 }]);
+    await env.DB.prepare(
+      'INSERT INTO cdeii_daily (settlement_date, region, sent_out_energy, emissions, intensity) VALUES (?,?,?,?,?)',
+    )
+      .bind(T0, 'NSW1', 1000, 850, 0.85)
+      .run();
+
+    // `time=` is an exact single interval. resolution=86400 makes it wear a
+    // DAILY BUCKET LABEL — which is exactly the trap: the label says "day",
+    // the data is one 5-minute reading. AEMO's full-day figure must not be
+    // parked beside it just because the resolution says 86400.
+    const exact = await intensity(`time=${T0 + 300}&resolution=86400`);
+    expect(exact.timestamps).toEqual([T0 + DAY]); // daily label, single interval of data
+    expect(seriesOf(exact, 'NSW1').values).toEqual([0.9]);
+    expect(seriesOf(exact, 'NSW1').official).toBeUndefined();
+  });
+
+  it('keeps the daily response shape when the window is empty', async () => {
+    // `official` is part of the daily contract, so its presence must not
+    // depend on whether any data happened to land in the window.
+    const empty = await intensity(`time_start=${T0 - 40 * DAY}&time_end=${T0 - 39 * DAY}&resolution=86400`);
+    expect(empty.timestamps).toEqual([]);
+    expect(seriesOf(empty, 'NEM').official).toEqual([]);
   });
 
   it('ignores generator filters — intensity is defined per region, so a fuel subset would be a wrong number', async () => {
