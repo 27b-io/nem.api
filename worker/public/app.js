@@ -291,12 +291,14 @@ async function load(region) {
 
     // Overlay is best-effort: never gate the fuel view on it (browser fetch
     // has no default timeout). fetchIntensity resolves null on any failure,
-    // so this .then never rejects; the loadId check drops stale responses.
+    // but render() inside the .then can still throw; the .catch keeps that
+    // from becoming an unhandled rejection. The loadId check drops stale
+    // responses.
     void fetchIntensity(region, payload.timestamps).then((intensity) => {
       if (loadId !== activeLoad) return;
       state.intensity = intensity;
       render();
-    });
+    }).catch((err) => console.error('intensity overlay failed:', err));
   } catch (err) {
     if (loadId !== activeLoad) return;
     console.error('fuel-mix load failed:', err);
