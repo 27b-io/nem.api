@@ -1,6 +1,6 @@
 import { BACKFILL_CRON, runBackfill } from './backfill';
 import { handleApiCached } from './cache';
-import { DISPATCH_IS_FEED, runIngest, SCADA_FEED } from './ingest';
+import { DISPATCH_IS_FEED, type Feed, runIngest, SCADA_FEED } from './ingest';
 
 export interface Env {
   DB: D1Database;
@@ -42,17 +42,16 @@ export default {
   // regardless. Per-file/day errors are isolated inside each runner.
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
     const backfill = controller.cron === BACKFILL_CRON;
-    const runs: Array<[label: string, run: () => Promise<unknown>]> = backfill
-      ? [
-          ['backfill:scada', () => runBackfill(env, SCADA_FEED)],
-          ['backfill:dispatchis', () => runBackfill(env, DISPATCH_IS_FEED)],
-        ]
-      : [
-          ['ingest:scada', () => runIngest(env, SCADA_FEED)],
-          ['ingest:dispatchis', () => runIngest(env, DISPATCH_IS_FEED)],
-        ];
+    // Generic helper (not a .map over the two feeds) so each Feed<Batch>
+    // instantiates concretely; the label derives from feed.label so the
+    // tail-log namespace can never split from the runners' own tags.
+    function entry<B>(feed: Feed<B>): [label: string, run: () => Promise<unknown>] {
+      return backfill
+        ? [`backfill:${feed.label}`, () => runBackfill(env, feed)]
+        : [`ingest:${feed.label}`, () => runIngest(env, feed)];
+    }
     let firstError: unknown;
-    for (const [label, run] of runs) {
+    for (const [label, run] of [entry(SCADA_FEED), entry(DISPATCH_IS_FEED)]) {
       try {
         await run();
       } catch (err) {

@@ -75,7 +75,7 @@ export interface FeedProcessor<Batch> {
   finish(): void;
 }
 
-export interface Feed<Batch = unknown> {
+export interface Feed<Batch> {
   /** Log/error tag: messages read `ingest:<label>: …` / `backfill:<label>: …`. */
   label: string;
   currentListingUrl: string;
@@ -112,12 +112,14 @@ async function alreadyIngested(db: D1Database, filenames: string[]): Promise<Set
   if (filenames.length === 0) return new Set();
   // Filenames sort chronologically (fixed prefix + timestamp), so one range
   // query bounds the ledger scan to the listing's window however large the
-  // ledger grows. (It may sweep in the other feed's filenames — harmless,
-  // membership tests still hold.)
-  const oldest = filenames.reduce((a, b) => (a < b ? a : b));
+  // ledger grows. Both bounds matter now that two feeds share the ledger:
+  // every PUBLIC_DISPATCHIS_* name sorts below every PUBLIC_DISPATCHSCADA_*
+  // name, so a lower bound alone would make the DispatchIS ingest sweep the
+  // entire (never-pruned) SCADA ledger on every 5-minute run.
+  const sorted = [...filenames].sort();
   const { results } = await db
-    .prepare('SELECT filename FROM scrape WHERE filename >= ?')
-    .bind(oldest)
+    .prepare('SELECT filename FROM scrape WHERE filename >= ? AND filename <= ?')
+    .bind(sorted[0], sorted[sorted.length - 1])
     .all<{ filename: string }>();
   return new Set(results.map((r) => r.filename));
 }
@@ -349,8 +351,9 @@ async function ingestFile<B>(
   return stored;
 }
 
-export async function runIngest<B>(env: Env, feed: Feed<B>, listingUrl: string = feed.currentListingUrl): Promise<void> {
+export async function runIngest<B>(env: Env, feed: Feed<B>): Promise<void> {
   const tag = `ingest:${feed.label}`;
+  const listingUrl = feed.currentListingUrl;
   const listing = await fetch(listingUrl);
   if (!listing.ok) throw new Error(`HTTP ${listing.status} fetching listing ${listingUrl}`);
   const filenames = await extractZipFilenames(listing);

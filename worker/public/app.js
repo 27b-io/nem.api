@@ -49,8 +49,12 @@ const $ = (id) => document.getElementById(id);
 const chartEl = $('chart');
 
 // dispatch = /api/v2/dispatch payload (all regions; sliced client-side), or
-// null until an overlay first turns on. Overlays are OFF by default.
-const state = { region: '', payload: null, ordered: [], chart: null, dispatch: null, overlays: { price: false, demand: false } };
+// null until an overlay first turns on; aligned = its per-render projection
+// onto the chart's time axis. Overlays are OFF by default.
+const state = {
+  region: '', payload: null, ordered: [], chart: null,
+  dispatch: null, aligned: null, overlays: { price: false, demand: false },
+};
 
 /** Price needs a single region — the NEM has no NEM-wide spot price. */
 const priceDrawable = () => state.overlays.price && state.region !== '';
@@ -80,7 +84,10 @@ function renderChart() {
   // Overlays (LAB-1700) append AFTER the stack series so band indexes stay
   // valid. Lines, never fills — mark kind is the primary separator from the
   // stacked areas; the always-visible readout is the shared relief channel.
-  const overlays = state.dispatch ? alignOverlays(state.payload.timestamps, state.dispatch, state.region) : null;
+  // Aligned once per render and stashed for renderReadout (which runs on
+  // every cursor move — no per-mousemove realignment).
+  state.aligned = state.dispatch ? alignOverlays(state.payload.timestamps, state.dispatch, state.region) : null;
+  const overlays = state.aligned;
   const showDemand = state.overlays.demand && overlays !== null;
   const showPrice = priceDrawable() && overlays !== null;
   if (showDemand) {
@@ -208,8 +215,8 @@ function renderReadout(cursorIdx) {
 
   // Overlay readout rows (LAB-1700): the same relief channel the fuel bands
   // use — every hovered price/demand value is reachable without color.
-  if (state.dispatch && (state.overlays.demand || priceDrawable())) {
-    const overlays = alignOverlays(payload.timestamps, state.dispatch, state.region);
+  if (state.aligned && (state.overlays.demand || priceDrawable())) {
+    const overlays = state.aligned;
     const theme = currentTheme();
     const addOverlayRow = (kind, label, text) => {
       const row = document.createElement('div');
@@ -303,7 +310,11 @@ async function load(region) {
   try {
     const [payload, dispatch] = await Promise.all([
       fetchJson(url),
-      overlaysWanted() ? fetchDispatch() : Promise.resolve(null),
+      // A dispatch failure must never take the fuel-mix chart down with it:
+      // degrade to a missing overlay (readout shows "—") and log it.
+      overlaysWanted()
+        ? fetchDispatch().catch((err) => { console.error('dispatch overlay refresh failed:', err); return null; })
+        : Promise.resolve(null),
     ]);
     if (loadId !== activeLoad) return;
     state.payload = payload;
@@ -348,6 +359,13 @@ function renderRegionFilter() {
 function updateOverlayControls() {
   const price = $('overlay-price');
   price.disabled = state.region === '';
+  if (price.disabled && price.checked) {
+    // A disabled checkbox can't be unchecked by the user, and a checked-but-
+    // undrawable price would keep refetching dispatch on every NEM load —
+    // turn it off honestly; re-enable is one click after picking a region.
+    price.checked = false;
+    state.overlays.price = false;
+  }
   price.closest('label').classList.toggle('opacity-50', price.disabled);
 }
 

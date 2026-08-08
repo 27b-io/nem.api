@@ -169,14 +169,10 @@ export interface BackfillRun {
   remaining: number;
 }
 
-export async function runBackfill<B>(
-  env: Env,
-  feed: Feed<B>,
-  listingUrl: string = feed.archiveListingUrl,
-): Promise<BackfillRun> {
+export async function runBackfill<B>(env: Env, feed: Feed<B>): Promise<BackfillRun> {
   const tag = `backfill:${feed.label}`;
-  const listing = await fetch(listingUrl);
-  if (!listing.ok) throw new Error(`HTTP ${listing.status} fetching listing ${listingUrl}`);
+  const listing = await fetch(feed.archiveListingUrl);
+  if (!listing.ok) throw new Error(`HTTP ${listing.status} fetching listing ${feed.archiveListingUrl}`);
   const dailies = (await extractZipFilenames(listing)).filter((n) => feed.dailyNameRe.test(n));
 
   const seen = await ledgeredDailies(env.DB, dailies, feed.dailyNameGlob);

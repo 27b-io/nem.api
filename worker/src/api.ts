@@ -470,8 +470,10 @@ async function handleDispatch(env: Env, params: URLSearchParams): Promise<Respon
   const { limit, offset } = resolveLimit(params);
 
   const where = timeClauses(window, 'settlement_time');
-  const rawRegion = firstParam(params, DISPATCH_FILTERS[0].aliases);
-  if (rawRegion !== undefined) where.push(filterClause('region', 'region', rawRegion));
+  for (const { column, aliases } of DISPATCH_FILTERS) {
+    const raw = firstParam(params, aliases);
+    if (raw !== undefined) where.push(filterClause(column, column, raw));
+  }
 
   // AVG/MAX ignore NULL sides of a partially-ingested row; an all-NULL bucket
   // yields null in the aligned arrays, same "no sample" semantics as values.
