@@ -1,12 +1,13 @@
-// ARCHIVE backfill (LAB-420 SCADA, LAB-1700 DispatchIS): ingest a NEMWEB
-// ARCHIVE's rolling ~13 months of daily zips into D1 and R2. Each daily zip
-// is a zip-of-zips (288 inner five-minute zips, same filename format as
-// CURRENT); the inner CSVs go through the same Feed parse/store path as the
-// CURRENT ingest (src/ingest.ts).
+// ARCHIVE backfill (LAB-420 SCADA, LAB-1700 DispatchIS, LAB-1701 rooftop PV):
+// ingest a NEMWEB ARCHIVE's rolling window of bundle zips into D1 and R2.
+// Each bundle is a zip-of-zips (daily × 288 inner five-minute zips for the
+// dispatch feeds; weekly × 336 inner half-hour zips for ROOFTOP_PV — same
+// two-level packaging, just a bigger "day"); the inner CSVs go through the
+// same Feed parse/store path as the CURRENT ingest (src/ingest.ts).
 //
 // Runs on its own cron (BACKFILL_CRON, offset from the 5-minute ingest so the
 // two never share an invocation budget) and drains oldest-first at
-// MAX_DAYS_PER_RUN per run — a full archive (~375 days) completes in roughly
+// MAX_BUNDLES_PER_RUN per run — a full archive (~375 days) completes in roughly
 // a day of wall time. Once drained, each run costs a listing fetch plus one
 // ledger query, and picks up new daily zips as ARCHIVE publishes them — so
 // gaps longer than CURRENT's ~2-day window heal automatically, forever.
@@ -36,15 +37,11 @@ export const BACKFILL_CRON = '11,26,41,56 * * * *';
 // budget) and ~90 subrequests; drains ~375 days in ~24h at the 15-min
 // cadence. Bump if a backfill needs to land faster — memory is nowhere near
 // the ceiling.
-const MAX_DAYS_PER_RUN = 4;
+const MAX_BUNDLES_PER_RUN = 4;
 
 // Same WAF posture as the CURRENT ingest: consecutive fetch failures usually
 // mean NEMWEB is rate-limiting us — stop extending the block, resume next run.
 const MAX_CONSECUTIVE_FAILURES = 3;
-
-// A complete NEM day is 288 five-minute dispatch intervals (market time never
-// observes daylight saving, so there are no 276/300-interval days).
-const INTERVALS_PER_DAY = 288;
 
 export interface DayStats {
   innerFiles: number;
@@ -173,16 +170,16 @@ export async function runBackfill<B>(env: Env, feed: Feed<B>): Promise<BackfillR
   const tag = `backfill:${feed.label}`;
   const listing = await fetchNemweb(feed.archiveListingUrl);
   if (!listing.ok) throw new Error(`HTTP ${listing.status} fetching listing ${feed.archiveListingUrl}`);
-  const dailies = (await extractZipFilenames(listing)).filter((n) => feed.dailyNameRe.test(n));
+  const bundles = (await extractZipFilenames(listing)).filter((n) => feed.archiveNameRe.test(n));
 
-  const seen = await ledgeredDailies(env.DB, dailies, feed.dailyNameGlob);
-  const pending = dailies.filter((f) => !seen.has(f)); // sorted → oldest first
+  const seen = await ledgeredDailies(env.DB, bundles, feed.archiveNameGlob);
+  const pending = bundles.filter((f) => !seen.has(f)); // sorted → oldest first
   if (pending.length === 0) {
-    console.log(`${tag}: idle (${dailies.length} daily archives listed, all ingested)`);
+    console.log(`${tag}: idle (${bundles.length} archive bundles listed, all ingested)`);
     return { ok: 0, failed: 0, values: 0, remaining: 0 };
   }
 
-  const batch = pending.slice(0, MAX_DAYS_PER_RUN);
+  const batch = pending.slice(0, MAX_BUNDLES_PER_RUN);
   const processor = await feed.createProcessor(env);
   let ok = 0;
   let failed = 0;
@@ -196,11 +193,15 @@ export async function runBackfill<B>(env: Env, feed: Feed<B>): Promise<BackfillR
       values += stats.values;
       consecutiveFailures = 0;
 
-      // Per-day sanity band (acceptance criterion): a complete day is 288
-      // inner files resolving to 288 distinct intervals. Deviations are gaps —
-      // logged here, permanently visible in the run history.
+      // Per-bundle sanity band (acceptance criterion): a complete bundle is
+      // feed.archiveInnerFiles inner files (288 for the daily 5-min feeds, 336
+      // for ROOFTOP_PV's weekly bundles) resolving to as many distinct
+      // intervals. Deviations are gaps — logged here, permanently visible in
+      // the run history.
       const gaps: string[] = [];
-      if (stats.innerFiles !== INTERVALS_PER_DAY) gaps.push(`${stats.innerFiles}/${INTERVALS_PER_DAY} inner files`);
+      if (stats.innerFiles !== feed.archiveInnerFiles) {
+        gaps.push(`${stats.innerFiles}/${feed.archiveInnerFiles} inner files`);
+      }
       if (stats.skippedInner > 0) gaps.push(`${stats.skippedInner} inner file(s) skipped`);
       if (stats.intervals !== stats.innerFiles - stats.skippedInner) {
         gaps.push(`${stats.intervals} distinct interval(s)`);
@@ -227,7 +228,7 @@ export async function runBackfill<B>(env: Env, feed: Feed<B>): Promise<BackfillR
   processor.finish();
   const remaining = pending.length - ok - failed;
   console.log(
-    `${tag}: ${ok}/${batch.length} daily archive(s) ingested (${values} values), ${failed} failed, ` +
+    `${tag}: ${ok}/${batch.length} archive bundle(s) ingested (${values} values), ${failed} failed, ` +
       `${remaining} remaining`,
   );
   return { ok, failed, values, remaining };

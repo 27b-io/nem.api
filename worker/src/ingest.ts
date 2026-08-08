@@ -26,6 +26,7 @@
 import { unzipSync } from 'fflate';
 import { parseDispatchIsCsv, type DispatchIsBatch } from './dispatchis';
 import type { Env } from './index';
+import { parseRooftopPvCsv, type RooftopRow } from './rooftop';
 import { refreshRollups } from './rollups';
 import { parseUnitScadaCsv } from './scada';
 
@@ -45,6 +46,7 @@ const MAX_CONSECUTIVE_FAILURES = 5;
 const SCADA_CHUNK_ROWS = 32; // 3 binds per scada_values row
 const REGION_CHUNK_ROWS = 25; // 4 binds per dispatch_region row
 const INTERCONNECTOR_CHUNK_ROWS = 32; // 3 binds per dispatch_interconnector row
+const ROOFTOP_CHUNK_ROWS = 25; // 4 binds per rooftop_pv row
 
 // upsertValues emits one 32-row statement per chunk; 8192 rows = 256
 // statements per D1 batch call, comfortably under request-size and
@@ -79,10 +81,24 @@ export interface Feed<Batch> {
   /** Log/error tag: messages read `ingest:<label>: …` / `backfill:<label>: …`. */
   label: string;
   currentListingUrl: string;
+  /**
+   * Only CURRENT filenames matching this are ingested. Absent = every zip on
+   * the listing (SCADA and DispatchIS listings carry nothing else). ROOFTOP_PV
+   * needs it: MEASUREMENT and SATELLITE files share one folder, and SATELLITE
+   * (the alternative estimate) is out of scope — unfiltered discovery would
+   * silently ingest both.
+   */
+  currentNameRe?: RegExp;
   archiveListingUrl: string;
-  /** Daily ARCHIVE bundle name shape (see src/backfill.ts). GLOB ? = exactly one character. */
-  dailyNameRe: RegExp;
-  dailyNameGlob: string;
+  /** ARCHIVE bundle name shape (see src/backfill.ts). GLOB ? = exactly one character. */
+  archiveNameRe: RegExp;
+  archiveNameGlob: string;
+  /**
+   * Inner five-/thirty-minute zips a complete ARCHIVE bundle carries — the
+   * backfill's per-bundle gap check. 288 for the daily 5-min feeds; 336 for
+   * ROOFTOP_PV's weekly bundles (48 half-hours × 7 days).
+   */
+  archiveInnerFiles: number;
   createProcessor(env: Env): Promise<FeedProcessor<Batch>>;
 }
 
@@ -229,8 +245,9 @@ export const SCADA_FEED: Feed<MappedRow[]> = {
   // Daily archive names: PUBLIC_DISPATCHSCADA_<YYYYMMDD>.zip (the inner
   // five-minute files carry a 12-digit timestamp plus sequence suffix, so the
   // two never collide in the ledger).
-  dailyNameRe: /^PUBLIC_DISPATCHSCADA_\d{8}\.zip$/,
-  dailyNameGlob: 'PUBLIC_DISPATCHSCADA_????????.zip',
+  archiveNameRe: /^PUBLIC_DISPATCHSCADA_\d{8}\.zip$/,
+  archiveNameGlob: 'PUBLIC_DISPATCHSCADA_????????.zip',
+  archiveInnerFiles: 288,
   async createProcessor(env: Env): Promise<FeedProcessor<MappedRow[]>> {
     const duids = await loadDuidMap(env.DB);
     const unknown = new Set<string>();
@@ -314,8 +331,9 @@ export const DISPATCH_IS_FEED: Feed<DispatchIsBatch> = {
   label: 'dispatchis',
   currentListingUrl: 'https://nemweb.com.au/Reports/Current/DispatchIS_Reports/',
   archiveListingUrl: 'https://nemweb.com.au/Reports/Archive/DispatchIS_Reports/',
-  dailyNameRe: /^PUBLIC_DISPATCHIS_\d{8}\.zip$/,
-  dailyNameGlob: 'PUBLIC_DISPATCHIS_????????.zip',
+  archiveNameRe: /^PUBLIC_DISPATCHIS_\d{8}\.zip$/,
+  archiveNameGlob: 'PUBLIC_DISPATCHIS_????????.zip',
+  archiveInnerFiles: 288,
   // async to satisfy the Feed contract (the SCADA processor loads its DUID map).
   async createProcessor(env: Env): Promise<FeedProcessor<DispatchIsBatch>> {
     return {
@@ -341,6 +359,67 @@ export const DISPATCH_IS_FEED: Feed<DispatchIsBatch> = {
         };
         await upsertDispatchRows(env.DB, merged);
         return merged.regions.length + merged.interconnectors.length;
+      },
+      finish() {},
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Rooftop PV feed (LAB-1701)
+
+/** Idempotent chunked upsert of rooftop PV rows; one D1 batch per call. */
+export async function upsertRooftopRows(db: D1Database, rows: RooftopRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const statements: D1PreparedStatement[] = [];
+  for (let i = 0; i < rows.length; i += ROOFTOP_CHUNK_ROWS) {
+    const chunk = rows.slice(i, i + ROOFTOP_CHUNK_ROWS);
+    const sql =
+      'INSERT INTO rooftop_pv (interval_time, region, power, quality) VALUES ' +
+      chunk.map(() => '(?,?,?,?)').join(',') +
+      ' ON CONFLICT(interval_time, region) DO UPDATE SET power = excluded.power, quality = excluded.quality';
+    statements.push(db.prepare(sql).bind(...chunk.flatMap((r) => [r.intervalTime, r.region, r.power, r.quality])));
+  }
+  await db.batch(statements);
+}
+
+export const ROOFTOP_FEED: Feed<RooftopRow[]> = {
+  label: 'rooftop',
+  currentListingUrl: 'https://nemweb.com.au/Reports/Current/ROOFTOP_PV/ACTUAL/',
+  // MEASUREMENT files only — SATELLITE variants share the folder (see Feed).
+  // Runs on the same */5 cron as the other feeds even though files land every
+  // 30 minutes: 11 of 12 runs cost one listing fetch and exit on the
+  // nothing-new path, and the 5-minute poll keeps the publication lag (the
+  // estimate already trails its interval by ~30 min) from growing further.
+  currentNameRe: /^PUBLIC_ROOFTOP_PV_ACTUAL_MEASUREMENT_\d{14}_\d+\.zip$/,
+  archiveListingUrl: 'https://nemweb.com.au/Reports/Archive/ROOFTOP_PV/ACTUAL/',
+  // WEEKLY bundles (~54 on the listing), named for the week's first day; the
+  // inner half-hour files carry a 14-digit timestamp plus sequence suffix, so
+  // bundle and inner names never collide in the ledger. Same two-level
+  // zip-of-zips packaging as the daily feeds — just a bigger "day".
+  archiveNameRe: /^PUBLIC_ROOFTOP_PV_ACTUAL_MEASUREMENT_\d{8}\.zip$/,
+  archiveNameGlob: 'PUBLIC_ROOFTOP_PV_ACTUAL_MEASUREMENT_????????.zip',
+  archiveInnerFiles: 336, // 48 half-hours × 7 days
+  // async to satisfy the Feed contract (the SCADA processor loads its DUID map).
+  async createProcessor(env: Env): Promise<FeedProcessor<RooftopRow[]>> {
+    return {
+      parse(csv, context) {
+        const { rows, malformed } = parseRooftopPvCsv(csv);
+        if (malformed > 0) console.warn(`${context}: skipped ${malformed} malformed row(s)`);
+        if (rows.length === 0) {
+          // A MEASUREMENT file always carries one MEASUREMENT row per region —
+          // zero means format drift, fail loud like the other feeds.
+          throw new Error('no MEASUREMENT-type ROOFTOP,ACTUAL rows found');
+        }
+        const intervals = new Set<number>();
+        for (const r of rows) intervals.add(r.intervalTime);
+        return { batch: rows, rows: rows.length, intervals };
+      },
+      async store(batches) {
+        // A full backfill WEEK is ~1.7k rows → ~68 statements, one batch.
+        const merged = batches.flat();
+        await upsertRooftopRows(env.DB, merged);
+        return merged.length;
       },
       finish() {},
     };
@@ -388,7 +467,9 @@ export async function runIngest<B>(env: Env, feed: Feed<B>): Promise<void> {
   const listingUrl = feed.currentListingUrl;
   const listing = await fetchNemweb(listingUrl);
   if (!listing.ok) throw new Error(`HTTP ${listing.status} fetching listing ${listingUrl}`);
-  const filenames = await extractZipFilenames(listing);
+  const discovered = await extractZipFilenames(listing);
+  const nameRe = feed.currentNameRe;
+  const filenames = nameRe === undefined ? discovered : discovered.filter((f) => nameRe.test(f));
 
   const seen = await alreadyIngested(env.DB, filenames);
   const pending = filenames.filter((f) => !seen.has(f)); // sorted → oldest first

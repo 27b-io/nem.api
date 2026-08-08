@@ -49,6 +49,14 @@ export const DISPATCH_INTERVAL_SECONDS = 300;
 // ponytail: fixed grace covering ingest lag after each */5 boundary; raise if
 // wrangler tail shows NEMWEB fetch+insert regularly exceeding it.
 export const INGEST_GRACE_SECONDS = 60;
+// Rooftop PV (LAB-1701) closes on a different clock: the source is 30-minute
+// AND the estimate for interval T is only PUBLISHED ~T+30min (observed live:
+// the T+30 file carries interval T), then ingested within a poll cycle. A
+// window ending at T can therefore keep changing until ~T+35min — closing it
+// on the dispatch boundary + 60s would cache a response missing its final
+// half-hour for a whole day. 45 minutes = publication lag + poll + margin.
+export const ROOFTOP_INTERVAL_SECONDS = 1800;
+export const ROOFTOP_PUBLICATION_GRACE_SECONDS = 2700;
 // Fully-past windows are immutable per the dispatch model, but the ARCHIVE
 // backfill (LAB-420) heals >2-day-old gaps — an infinite TTL would pin a gap
 // response past its heal. One day keeps D1 at one query per unique historical
@@ -175,6 +183,7 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
       route === '/api/v2/values' ||
       route === '/api/v2/values/aggregate' ||
       route === '/api/v2/dispatch' ||
+      route === '/api/v2/rooftop' ||
       route === '/api/v2/intensity'
     ) {
       if (route === '/api/v2/values/aggregate') {
@@ -208,9 +217,9 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
       // resolution floor instead. For that route these are unrecognised params
       // and stay out of the key like any other, so `?limit=5` cannot mint a
       // second entry for a byte-identical response.
-      if (route === '/api/v2/dispatch') {
-        // dispatch has no sort and only the region filter — a `sort=` or
-        // `fuel=` the handler ignores must not fragment the cache.
+      if (route === '/api/v2/dispatch' || route === '/api/v2/rooftop') {
+        // dispatch/rooftop have no sort and only the region filter — a
+        // `sort=` or `fuel=` the handler ignores must not fragment the cache.
         const { limit, offset } = resolveLimit(params);
         parts.push(`lim=${limit}`, `off=${offset}`, ...filterParts(params, DISPATCH_FILTERS));
       } else if (route !== '/api/v2/intensity') {
@@ -238,11 +247,13 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
       }
       // Closed = every sample the response can ever reflect has been
       // ingested: the interval containing `upper` has ended AND its ingest
-      // grace has passed.
+      // grace has passed. Rooftop closes on its own clock (30-min intervals,
+      // ~30-min PUBLICATION lag — see the constants above); the others close
+      // one ingest grace after the 5-minute dispatch boundary.
+      const closeInterval = route === '/api/v2/rooftop' ? ROOFTOP_INTERVAL_SECONDS : DISPATCH_INTERVAL_SECONDS;
+      const closeGrace = route === '/api/v2/rooftop' ? ROOFTOP_PUBLICATION_GRACE_SECONDS : INGEST_GRACE_SECONDS;
       const closed =
-        !nowDerived &&
-        upper !== undefined &&
-        nowSeconds >= Math.ceil(upper / DISPATCH_INTERVAL_SECONDS) * DISPATCH_INTERVAL_SECONDS + INGEST_GRACE_SECONDS;
+        !nowDerived && upper !== undefined && nowSeconds >= Math.ceil(upper / closeInterval) * closeInterval + closeGrace;
       ttl = closed ? CLOSED_WINDOW_TTL_SECONDS : boundaryTtl(nowSeconds);
     } else {
       return null;

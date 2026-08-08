@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildStack, orderSeries } from '../public/stacking';
+import { buildStack, FUEL_SLOTS, orderSeries, ROOFTOP_KEY } from '../public/stacking';
 
 // The dashboard's diverging-stack transform (LAB-419). The API contract pins
 // values as NET MW — batteries go negative while charging and can flip sign
@@ -20,6 +20,30 @@ describe('orderSeries', () => {
     // battery lands in the reserved violet slot, unknown in the gray fold
     expect(ordered[2].light).toBe('#4a3aa7');
     expect(ordered[3].light).toBe('#8b8b85');
+  });
+
+  it('ranks the rooftop pseudo-series (LAB-1701) directly above Solar, below battery and grays', () => {
+    const ordered = orderSeries([
+      { key: 'Battery storage', values: [1] },
+      { key: ROOFTOP_KEY, values: [2] },
+      { key: 'Solar', values: [3] },
+      { key: 'Mystery Fuel', values: [4] },
+    ]);
+    expect(ordered.map((f: { label: string }) => f.label)).toEqual([
+      'Solar',
+      'Rooftop solar (est.)',
+      'Battery storage',
+      'Mystery Fuel',
+    ]);
+    // ROOFTOP_KEY is the contract between app.js and the palette slot — it
+    // must resolve to a FUEL_SLOTS entry, not fall through to the gray fold.
+    const slot = FUEL_SLOTS.find((f: { key: string }) => f.key === ROOFTOP_KEY);
+    expect(slot).toBeDefined();
+    expect(ordered[1].light).toBe(slot!.light);
+    // Distinct from Solar in both themes (validated pair, not a shared hue).
+    const solar = FUEL_SLOTS.find((f: { key: string }) => f.key === 'Solar')!;
+    expect(slot!.light).not.toBe(solar.light);
+    expect(slot!.dark).not.toBe(solar.dark);
   });
 
   it('keeps unknown keys as their own series — never dropped or merged', () => {

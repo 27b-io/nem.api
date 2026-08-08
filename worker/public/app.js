@@ -23,8 +23,8 @@
  * Known WARNs, both relieved by the always-visible readout values (the
  * mandated relief channel): solar #eda100 is 2.17:1 on white; fossil #8f4d0f
  * is 2.44:1 on the dark surface. */
-import { alignOverlays, OVERLAY_INKS } from './overlays.js';
-import { buildStack, orderSeries } from './stacking.js';
+import { alignOverlays, alignRooftop, OVERLAY_INKS } from './overlays.js';
+import { buildStack, orderSeries, ROOFTOP_KEY } from './stacking.js';
 import { bucketLabel, DEFAULT_RANGE, RANGES, rangeQuery } from './ranges.js';
 
 const REGIONS = [
@@ -74,6 +74,12 @@ const state = {
   dispatch: null,
   aligned: null,
   overlays: { price: false, demand: false },
+  /* rooftop = /api/v2/rooftop payload (LAB-1701, all regions; sliced
+   * client-side like dispatch), or null when the fetch failed — the band
+   * degrades to absent, never to zeros. ON by default; the toggle keeps the
+   * old grid-scale-only view one click away. */
+  rooftop: null,
+  showRooftop: true,
 };
 
 /** Price needs a single region — the NEM has no NEM-wide spot price. */
@@ -290,7 +296,16 @@ function renderReadout(cursorIdx) {
   const totalRow = document.createElement('div');
   totalRow.className = 'mt-2 flex items-center gap-2 border-t border-base-300 pt-2 font-semibold';
   const totalName = document.createElement('span');
-  totalName.textContent = 'Total net MW';
+  // Same honesty rule as the hero (LAB-1701): say whether rooftop is in THIS
+  // bucket's total — at the live edge the estimate isn't published yet and
+  // the rooftop row above already reads "—".
+  const roof = rooftopOrdered();
+  totalName.textContent =
+    roof === null
+      ? 'Total net MW'
+      : roof.values[idx] == null
+        ? 'Total net MW (excl. rooftop)'
+        : 'Total net MW (incl. rooftop est.)';
   const totalVal = document.createElement('span');
   totalVal.className = 'ms-auto tabular-nums';
   totalVal.textContent = sawValue ? fmtMW.format(total) : '—';
@@ -397,6 +412,7 @@ function renderHero() {
   const n = payload ? payload.timestamps.length : 0;
   if (n === 0) {
     $('hero-total').textContent = '—';
+    $('hero-total-label').textContent = 'Grid-scale generation, net';
     $('hero-asat').textContent = 'No data in this window.';
     return;
   }
@@ -410,11 +426,41 @@ function renderHero() {
   const ts = payload.timestamps[last] * 1e3;
   // An all-null latest bucket (ingest lag) is "no reading", not 0 MW.
   $('hero-total').textContent = sawValue ? `${fmtMW.format(total)} MW` : '—';
+  // The label states whether rooftop is IN this number at THIS timestamp
+  // (LAB-1701): the estimate trails SCADA by ~30-60 min, so the freshest
+  // bucket usually predates it — a silent understatement here would read as
+  // "solar collapsed". Three honest states, one per data situation.
+  const roof = rooftopOrdered();
+  const roofValue = roof === null ? null : roof.values[last];
+  $('hero-total-label').textContent =
+    roof === null
+      ? 'Grid-scale generation, net'
+      : roofValue == null
+        ? 'Grid-scale generation, net · rooftop est. not yet published'
+        : 'Generation incl. rooftop solar (est.), net';
   $('hero-asat').textContent = `as at ${fmtTime.format(ts)} AEST · ${fmtDate.format(ts)}`;
 }
 
+/* The rooftop band (LAB-1701) joins the stack as a pseudo-series under
+ * ROOFTOP_KEY: AEMO's 30-minute estimate projected onto the chart axis, null
+ * (absent, never zero) wherever no estimate is published — which is always
+ * the newest ~30-60 min, since the estimate trails SCADA. Appended AFTER the
+ * aggregate's own series so a hypothetical future 'Rooftop solar' fuel key
+ * from the API would surface as a duplicate row (visible bug) rather than
+ * being silently swallowed. */
+function seriesWithRooftop() {
+  const base = state.payload.series;
+  if (!state.showRooftop || !state.rooftop) return base;
+  const values = alignRooftop(state.payload.timestamps, state.payload.resolution, state.rooftop, state.region);
+  if (!values.some((v) => v != null)) return base;
+  return [...base, { key: ROOFTOP_KEY, values }];
+}
+
+/** The rooftop series as rendered, or null when the band is off/absent. */
+const rooftopOrdered = () => state.ordered.find((f) => f.key === ROOFTOP_KEY) ?? null;
+
 function render() {
-  state.ordered = orderSeries(state.payload.series);
+  state.ordered = orderSeries(seriesWithRooftop());
   $('truncated-badge').classList.toggle('hidden', !state.payload.truncated);
   renderHero();
   renderChart();
@@ -469,7 +515,7 @@ async function load(region, range) {
     // the same range query as the aggregate: intensityForRegion joins the two
     // payloads strictly by timestamp, and equal windows are what make their
     // bucket axes equal (same rule as fetchDispatch below).
-    const [payload, intensity, dispatch] = await Promise.all([
+    const [payload, intensity, dispatch, rooftop] = await Promise.all([
       fetchJson(url),
       fetch(`/api/v2/intensity?${rangeQuery(range)}`)
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
@@ -480,10 +526,20 @@ async function load(region, range) {
       wantedDispatch
         ? fetchDispatch(range).catch((err) => { console.error('dispatch overlay refresh failed:', err); return null; })
         : Promise.resolve(null),
+      // Rooftop (LAB-1701) rides every load like intensity: no region param
+      // (all five regions in one small payload, sliced client-side), same
+      // range query so the bucket axes join by timestamp, and isolated
+      // failure — a missing estimate degrades the band to absent, never
+      // takes the fuel mix down and never renders zeros.
+      fetchJson(`/api/v2/rooftop?${rangeQuery(range)}`).catch((err) => {
+        console.error('rooftop-pv load failed:', err);
+        return null;
+      }),
     ]);
     if (loadId !== activeLoad) return;
     state.payload = payload;
     state.intensity = intensity;
+    state.rooftop = rooftop;
     // Assign only when this load's dispatch arm was real (fetched — null then
     // means failed, degrade honestly) or overlays are still off (null clears
     // any stale payload). An overlay toggled ON mid-flight fetches under this
@@ -625,6 +681,14 @@ $('intensity-toggle').addEventListener('change', (e) => {
   if (!state.payload) return;
   renderChart();
   renderReadout(null);
+});
+
+// The rooftop toggle changes the SERIES SET (band in/out of the stack), so it
+// goes through render() — hero label, stack order and readout must all agree.
+$('rooftop-toggle').addEventListener('change', (e) => {
+  state.showRooftop = e.target.checked;
+  if (!state.payload) return;
+  render();
 });
 
 initTheme();
