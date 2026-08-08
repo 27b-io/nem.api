@@ -17,6 +17,7 @@
 
 import { unzipSync } from 'fflate';
 import type { Env } from './index';
+import { refreshRollups } from './rollups';
 import { parseUnitScadaCsv } from './scada';
 
 export const CURRENT_LISTING_URL = 'https://nemweb.com.au/Reports/CURRENT/Dispatch_SCADA/';
@@ -87,6 +88,24 @@ async function alreadyIngested(db: D1Database, filenames: string[]): Promise<Set
   return new Set(results.map((r) => r.filename));
 }
 
+/**
+ * Refresh the rollup buckets (LAB-1696) covering a batch of upserted rows.
+ * Must run BEFORE the ledger write: a refresh failure then leaves the file
+ * unrecorded, and the retry rebuilds values + rollups together — rollups can
+ * never go permanently stale behind a ledgered file. Shared by the CURRENT
+ * ingest and the ARCHIVE backfill (src/backfill.ts).
+ */
+export async function refreshTouchedRollups(db: D1Database, rows: MappedRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  let minTime = rows[0].scrapeTime;
+  let maxTime = minTime;
+  for (const row of rows) {
+    if (row.scrapeTime < minTime) minTime = row.scrapeTime;
+    if (row.scrapeTime > maxTime) maxTime = row.scrapeTime;
+  }
+  await refreshRollups(db, minTime, maxTime);
+}
+
 /** Idempotent chunked upsert; one D1 batch (= one transaction) per call. */
 export async function upsertValues(db: D1Database, rows: MappedRow[]): Promise<void> {
   if (rows.length === 0) return;
@@ -137,6 +156,7 @@ async function ingestFile(
   }
 
   await upsertValues(env.DB, mapped);
+  await refreshTouchedRollups(env.DB, mapped);
 
   // Archive the raw zip under a deterministic key; a no-op when already there.
   const key = `current/${filename}`;

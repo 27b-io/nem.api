@@ -17,14 +17,11 @@
 //   negative through SUM (see API.md for the convention).
 
 import type { Env } from './index';
+import { bucketExpr, nemBucket } from './rollups';
 
 const MAX_LIMIT = 300000;
 const DEFAULT_WINDOW_SECONDS = 86400;
 const RESOLUTIONS = [300, 1800, 3600, 86400];
-// NEM market time is AEST (UTC+10, no DST). 36000 % res === 0 for every
-// sub-daily resolution, so the offset only shifts daily bucket boundaries
-// (to AEST midnight) — sub-daily buckets are unaffected by it.
-const NEM_UTC_OFFSET_SECONDS = 36000;
 
 export const CORS_HEADERS = {
   'access-control-allow-origin': '*',
@@ -239,15 +236,6 @@ const SORT_COLUMNS: Record<string, string> = {
   value: 'value',
 };
 
-/**
- * Bucket label expression: period-ENDING (AEMO SETTLEMENTDATE convention — a
- * sample ending exactly on a boundary belongs to the bucket ending there),
- * aligned to NEM time. `resolution` is a server-validated allowlist member.
- */
-function bucketExpr(column: string, resolution: number): string {
-  return `((${column} + ${NEM_UTC_OFFSET_SECONDS + resolution - 1}) / ${resolution}) * ${resolution} - ${NEM_UTC_OFFSET_SECONDS}`;
-}
-
 export function resolveOrder(params: URLSearchParams): string {
   const raw = firstParam(params, ['sort', 'order']);
   if (raw === undefined) return 'ORDER BY bucket ASC, gid ASC';
@@ -381,22 +369,62 @@ async function handleAggregate(env: Env, params: URLSearchParams): Promise<Respo
   const resolution = resolveResolution(params, window, nowSeconds);
   const { limit, offset } = resolveLimit(params);
 
-  const where = [...timeClauses(window, 'sv.scrape_time'), ...generatorFilters(params, 'g.')];
+  let sql: string;
+  let binds: (string | number)[];
+  if (window.exact === undefined && resolution >= 3600) {
+    // Rollup path (LAB-1696): GROUP-BYing raw 5-minute rows over long windows
+    // exhausts SQLite's memory budget (D1 SQLITE_NOMEM observed at ~90 days),
+    // so resolution 3600/86400 reads the pre-aggregated per-generator tables
+    // maintained by ingest (src/rollups.ts). Semantics: value = the group's
+    // summed net MW over the bucket divided by the bucket's GLOBAL distinct-
+    // interval count — identical to the raw path whenever the group has a
+    // sample in every ingested interval of the bucket (the production norm:
+    // every registered DUID reports each dispatch interval); a group missing
+    // intervals inside a bucket averages them as 0 MW contribution instead of
+    // being skipped. A bucket straddling the window edge reports the FULL
+    // bucket's mean. Exact `time=` lookups stay raw — they read one interval.
+    const table = resolution === 86400 ? 'scada_daily' : 'scada_hourly';
+    const where: SqlFragment[] = [];
+    if (window.start !== undefined) where.push({ sql: 'r.bucket >= ?', binds: [nemBucket(window.start, resolution)] });
+    if (window.end !== undefined) where.push({ sql: 'r.bucket <= ?', binds: [nemBucket(window.end, resolution)] });
+    where.push(...generatorFilters(params, 'g.'));
+    // Interval counts are stored per hourly bucket; a daily bucket is exactly
+    // 24 NEM-aligned hours (no DST), so daily denominators sum the hourly ones.
+    const intervalsJoin =
+      resolution === 86400
+        ? `JOIN (SELECT ${bucketExpr('bucket', 86400)} AS day_bucket, SUM(n_intervals) AS n_intervals ` +
+          'FROM scada_intervals GROUP BY day_bucket) i ON i.day_bucket = r.bucket '
+        : 'JOIN scada_intervals i ON i.bucket = r.bucket ';
+    sql =
+      `SELECT r.bucket AS bucket, COALESCE(g.${groupColumn}, '') AS grp, ` +
+      // MAX() only satisfies the aggregate context — every joined row of a
+      // bucket carries the same n_intervals.
+      'ROUND(SUM(r.sum_value) / MAX(i.n_intervals), 4) AS value ' +
+      `FROM ${table} r JOIN generators g ON g.id = r.generator_id ` +
+      intervalsJoin +
+      `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
+      // Qualified r.bucket: the hourly intervals join carries a bucket column
+      // too, so the bare output alias would be ambiguous.
+      'GROUP BY r.bucket, grp ORDER BY r.bucket ASC, grp ASC LIMIT ? OFFSET ?';
+    binds = [...where.flatMap((c) => c.binds), limit, offset];
+  } else {
+    const where = [...timeClauses(window, 'sv.scrape_time'), ...generatorFilters(params, 'g.')];
 
-  // Inner query: instantaneous NET total MW per (dispatch interval, group) —
-  // negative values (storage charging, station load draw) sum through, per
-  // the net convention in API.md. Generators with a NULL group value land in
-  // the '' series rather than being dropped. Outer query: mean of those
-  // totals per bucket — mean-of-sums, which stays correct when a generator
-  // misses an interval inside the bucket.
-  const sql =
-    `SELECT ${bucketExpr('t', resolution)} AS bucket, grp, ROUND(AVG(total), 4) AS value FROM (` +
-    `SELECT sv.scrape_time AS t, COALESCE(g.${groupColumn}, '') AS grp, SUM(sv.value) AS total ` +
-    'FROM scada_values sv JOIN generators g ON g.id = sv.generator_id ' +
-    `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
-    'GROUP BY t, grp' +
-    ') GROUP BY bucket, grp ORDER BY bucket ASC, grp ASC LIMIT ? OFFSET ?';
-  const binds = [...where.flatMap((c) => c.binds), limit, offset];
+    // Inner query: instantaneous NET total MW per (dispatch interval, group) —
+    // negative values (storage charging, station load draw) sum through, per
+    // the net convention in API.md. Generators with a NULL group value land in
+    // the '' series rather than being dropped. Outer query: mean of those
+    // totals per bucket — mean-of-sums, which stays correct when a generator
+    // misses an interval inside the bucket.
+    sql =
+      `SELECT ${bucketExpr('t', resolution)} AS bucket, grp, ROUND(AVG(total), 4) AS value FROM (` +
+      `SELECT sv.scrape_time AS t, COALESCE(g.${groupColumn}, '') AS grp, SUM(sv.value) AS total ` +
+      'FROM scada_values sv JOIN generators g ON g.id = sv.generator_id ' +
+      `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
+      'GROUP BY t, grp' +
+      ') GROUP BY bucket, grp ORDER BY bucket ASC, grp ASC LIMIT ? OFFSET ?';
+    binds = [...where.flatMap((c) => c.binds), limit, offset];
+  }
 
   const { results } = await env.DB.prepare(sql)
     .bind(...binds)

@@ -12,7 +12,13 @@ let routes: Map<string, () => Response>;
 beforeEach(async () => {
   // vitest-pool-workers gives each test FILE its own runtime + storage, but
   // tests within a file share state — reset what these tests mutate.
-  await env.DB.batch([env.DB.prepare('DELETE FROM scada_values'), env.DB.prepare('DELETE FROM scrape')]);
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM scada_values'),
+    env.DB.prepare('DELETE FROM scada_hourly'),
+    env.DB.prepare('DELETE FROM scada_daily'),
+    env.DB.prepare('DELETE FROM scada_intervals'),
+    env.DB.prepare('DELETE FROM scrape'),
+  ]);
   const archived = await env.ARCHIVE.list({ prefix: 'archive/' });
   await Promise.all(archived.objects.map((o) => env.ARCHIVE.delete(o.key)));
 
@@ -118,6 +124,25 @@ describe('runBackfill', () => {
       expect(await env.ARCHIVE.head(`archive/PUBLIC_DISPATCHSCADA_${d}.zip`)).not.toBeNull();
     }
     expect(await ledgerFilenames()).toEqual(dates.map((d) => `PUBLIC_DISPATCHSCADA_${d}.zip`));
+
+    // Rollups (LAB-1696) are maintained by the same run: scada_hourly must be
+    // exactly a whole-bucket recomputation of what landed in scada_values —
+    // no bucket missing, none stale, sums and counts equal.
+    const drift = await env.DB.prepare(
+      'SELECT count(*) AS n FROM (' +
+        'SELECT ((scrape_time + 39599) / 3600) * 3600 - 36000 AS b, generator_id AS gid, ' +
+        'SUM(value) AS s, COUNT(*) AS c FROM scada_values GROUP BY b, gid' +
+        ') x LEFT JOIN scada_hourly h ON h.bucket = x.b AND h.generator_id = x.gid ' +
+        'WHERE h.bucket IS NULL OR abs(h.sum_value - x.s) > 1e-9 OR h.n_samples != x.c',
+    ).first<{ n: number }>();
+    expect(drift?.n).toBe(0);
+    const counts = await env.DB.prepare(
+      'SELECT (SELECT count(*) FROM scada_hourly) AS hourly, ' +
+        '(SELECT count(DISTINCT ((scrape_time + 39599) / 3600) * 3600) FROM scada_values) AS buckets, ' +
+        '(SELECT sum(n_intervals) FROM scada_intervals) AS intervals',
+    ).first<{ hourly: number; buckets: number; intervals: number }>();
+    // 2 days × 3 intervals inside one hour each → 2 hourly buckets × 2 DUIDs.
+    expect(counts).toEqual({ hourly: 4, buckets: 2, intervals: 6 });
   });
 
   it('is resumable: ledgered days are skipped without any zip fetch', async () => {
