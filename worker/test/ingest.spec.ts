@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { DISPATCH_IS_FEED, extractZipFilenames, loadDuidMap, upsertDispatchRows, upsertValues } from '../src/ingest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DISPATCH_IS_FEED, extractZipFilenames, fetchNemweb, loadDuidMap, upsertDispatchRows, upsertValues } from '../src/ingest';
 
 describe('upsertValues', () => {
   it('is idempotent: inserting the same key twice leaves one row, last value wins', async () => {
@@ -140,6 +140,24 @@ describe('loadDuidMap', () => {
     // Non-market units ('-') never appear in SCADA and must not be mapped.
     expect(map.has('-')).toBe(false);
     expect(map.has('NOT_A_REAL_DUID')).toBe(false);
+  });
+});
+
+describe('fetchNemweb', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('maps transport errors to an Error naming the URL, preserving the original as cause', async () => {
+    // AbortSignal.timeout rejects with this bare DOMException — no URL, no
+    // deadline — which is exactly why fetchNemweb wraps it.
+    const abort = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    vi.stubGlobal('fetch', () => Promise.reject(abort));
+    const url = 'https://nemweb.com.au/Reports/Current/Dispatch_SCADA/x.zip';
+    const err = await fetchNemweb(url).then(
+      () => { throw new Error('expected rejection'); },
+      (e: unknown) => e as Error,
+    );
+    expect(err.message).toBe(`NEMWEB fetch failed (${url}): The operation was aborted due to timeout`);
+    expect(err.cause).toBe(abort);
   });
 });
 

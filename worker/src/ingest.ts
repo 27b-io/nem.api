@@ -100,9 +100,23 @@ const NEMWEB_FETCH_TIMEOUT_MS = 120_000;
  * All NEMWEB calls go through here: fetch with a hard deadline. The signal
  * stays attached to the response body, so a stall during arrayBuffer() reads
  * aborts too, not just a stall before headers.
+ *
+ * Transport errors (incl. the deadline's bare "operation was aborted"
+ * DOMException, which names neither URL nor cause) are mapped here — the one
+ * choke point — to an Error carrying the URL, so every catch layer up the
+ * stack (per-file, per-day, per-feed) logs an actionable message. Callers
+ * deliberately do NOT catch: throwing to those layers is the designed
+ * ledger-write-last retry contract.
  */
-export function fetchNemweb(url: URL | string): Promise<Response> {
-  return fetch(url, { signal: AbortSignal.timeout(NEMWEB_FETCH_TIMEOUT_MS) });
+export async function fetchNemweb(url: URL | string): Promise<Response> {
+  try {
+    return await fetch(url, { signal: AbortSignal.timeout(NEMWEB_FETCH_TIMEOUT_MS) });
+  } catch (err) {
+    throw new Error(
+      `NEMWEB fetch failed (${url}): ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
 }
 
 /**
