@@ -43,16 +43,26 @@
     <nav class="flex flex-wrap items-center gap-3" aria-label="Region filter">
       <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Region</span>
       <div class="join" id="region-filter" role="group"></div>
+      <label class="ms-auto flex cursor-pointer items-center gap-2 text-sm">
+        <input type="checkbox" class="toggle toggle-sm" id="intensity-toggle" checked>
+        <span>Carbon intensity overlay</span>
+      </label>
     </nav>
 
     <section class="card chart-surface rounded-lg border border-base-300 shadow-sm">
       <div class="card-body gap-4 p-4 sm:p-6">
-        <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <div class="flex flex-wrap items-baseline gap-x-6 gap-y-1">
           <div>
             <p class="text-[0.65rem] uppercase tracking-widest text-base-content/50">
               Grid-scale generation, net
             </p>
             <p class="text-4xl font-semibold sm:text-5xl" id="hero-total" aria-live="polite">&mdash;</p>
+          </div>
+          <div>
+            <p class="text-[0.65rem] uppercase tracking-widest text-base-content/50">
+              Carbon intensity, estimated
+            </p>
+            <p class="text-4xl font-semibold sm:text-5xl" id="hero-intensity" aria-live="polite">&mdash;</p>
           </div>
           <p class="text-sm text-base-content/60" id="hero-asat"></p>
           <span class="badge badge-warning badge-sm hidden" id="truncated-badge"
@@ -79,6 +89,16 @@
           nor total supply. Values are net MW: storage draws below zero while charging.
           Times are AEST (NEM market time, UTC+10, no DST); each point is the 5-minute
           interval ending at that time.
+        </p>
+        <p class="text-xs text-base-content/60" id="intensity-note">
+          <strong class="font-semibold">Carbon intensity is an estimate</strong>, computed from
+          AEMO&rsquo;s published CDEII emission factors &times; dispatch SCADA, and reconciled daily
+          against AEMO&rsquo;s
+          <a class="link" href="https://nemweb.com.au/Reports/Current/CDEII/">official index</a>.
+          Factors are per MWh <em>sent out</em> while SCADA is <em>as-generated</em>, so these
+          numbers read a few percent high. Generation from units with no published factor is
+          excluded rather than counted as zero-emission &mdash; see
+          <a class="link" href="https://github.com/27b-io/nem.api/blob/master/worker/API.md#get-apiv2intensity">the method and its caveats</a>.
         </p>
       </div>
     </section>

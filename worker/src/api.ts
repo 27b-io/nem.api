@@ -1,5 +1,6 @@
 // HTTP query API (LAB-418): /api/v2/values, /api/v2/values/aggregate,
-// /api/v2/generators — a greenfields v2 contract over the D1 store. PUBLIC
+// /api/v2/generators, /api/v2/intensity — a greenfields v2 contract over the
+// D1 store. PUBLIC
 // (ray, 2026-07-24: public until abuse is detected), so the contract in
 // worker/API.md (owned jointly with the LAB-419 frontend) is the product.
 // The legacy restify API (api/v1.1) is reference-only, not a contract.
@@ -446,6 +447,173 @@ async function handleAggregate(env: Env, params: URLSearchParams): Promise<Respo
   });
 }
 
+// ---------------------------------------------------------------------------
+// Carbon intensity (LAB-1698)
+
+/**
+ * AEMO publishes its official daily index against the AEST midnight that
+ * STARTS the day (cdeii_daily.settlement_date); our daily buckets are
+ * period-ENDING, so the bucket covering that day is labelled one day later.
+ * This is the single place the two conventions are bridged.
+ */
+export const CDEII_DAY_SECONDS = 86400;
+
+/** The NEM-wide rollup series, reported alongside the five region series. */
+const NEM_KEY = 'NEM';
+
+interface IntensityRow {
+  bucket: number;
+  region: string;
+  /** Σ of every generator's clamped bucket output, mapped by a factor or not. */
+  mw_all: number;
+  /** …restricted to generators that DO carry a published factor. */
+  mw_covered: number;
+  /** Σ(clamped output × factor) over those same covered generators. */
+  emissions: number;
+}
+
+interface IntensityTotals {
+  mwAll: number;
+  mwCovered: number;
+  emissions: number;
+}
+
+/**
+ * Regional carbon intensity = Σ(MW × factor) / Σ(MW), energy-weighted over the
+ * bucket — the same ratio-of-sums AEMO's own daily index uses
+ * (TOTAL_EMISSIONS / TOTAL_SENT_OUT_ENERGY), so the two are directly
+ * comparable.
+ *
+ * Negative-MW rule: a generator's NET output over a bucket is clamped at zero,
+ * so a unit that is a net consumer in that bucket (a charging battery, a pump
+ * load, station draw) contributes to neither numerator nor denominator — it is
+ * not sending anything out. At resolution 300 a bucket is a single dispatch
+ * interval, so this is exactly "drop negative readings"; at coarser buckets it
+ * is the per-generator net. Leaving charging in the denominator would shrink
+ * it and inflate intensity, which is the wrong direction and would be worst
+ * exactly when the grid is cleanest.
+ *
+ * Both paths compute the identical expression: the rollup tables already hold
+ * the per-(bucket, generator) net sums that the raw path's inner query
+ * derives, and the interval count that the aggregate endpoint needs as a
+ * denominator cancels out of this ratio entirely. So the rollup path is not an
+ * approximation of the raw path here — it is algebraically the same number.
+ */
+async function handleIntensity(env: Env, params: URLSearchParams): Promise<Response> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const window = resolveTimeWindow(params, nowSeconds);
+  const resolution = resolveResolution(params, window, nowSeconds);
+  const { limit, offset } = resolveLimit(params);
+
+  // Generator filters are deliberately NOT accepted: intensity is defined per
+  // region, and a fuel/tech filter would produce a confidently wrong number
+  // (the emissions of a subset over the output of that same subset).
+  let sql: string;
+  let binds: (string | number)[];
+
+  if (window.exact === undefined && resolution >= 3600) {
+    const table = resolution === 86400 ? 'scada_daily' : 'scada_hourly';
+    const where: SqlFragment[] = [];
+    if (window.start !== undefined) where.push({ sql: 'r.bucket >= ?', binds: [nemBucket(window.start, resolution)] });
+    if (window.end !== undefined) where.push({ sql: 'r.bucket <= ?', binds: [nemBucket(window.end, resolution)] });
+    // MAX(x, 0) is SQLite's two-argument SCALAR max, not the aggregate.
+    const mw = 'MAX(r.sum_value, 0)';
+    sql =
+      `SELECT r.bucket AS bucket, COALESCE(g.state, '') AS region, SUM(${mw}) AS mw_all, ` +
+      `SUM(CASE WHEN f.duid IS NULL THEN 0 ELSE ${mw} END) AS mw_covered, ` +
+      `SUM(COALESCE(f.factor, 0) * ${mw}) AS emissions ` +
+      `FROM ${table} r JOIN generators g ON g.id = r.generator_id ` +
+      'LEFT JOIN emission_factors f ON f.duid = g.duid ' +
+      (where.length > 0 ? `WHERE ${where.map((c) => c.sql).join(' AND ')} ` : '') +
+      'GROUP BY r.bucket, region ORDER BY r.bucket ASC, region ASC LIMIT ? OFFSET ?';
+    binds = [...where.flatMap((c) => c.binds), limit, offset];
+  } else {
+    const where = timeClauses(window, 'sv.scrape_time');
+    // Inner query: per (bucket, generator) net MW, clamped — precisely what
+    // the rollup tables above store, which is what makes the two paths equal.
+    // region/factor are in the GROUP BY only for clarity; both are
+    // functionally determined by generator_id.
+    sql =
+      "SELECT bucket, region, SUM(mw) AS mw_all, SUM(CASE WHEN factor IS NULL THEN 0 ELSE mw END) AS mw_covered, " +
+      'SUM(COALESCE(factor, 0) * mw) AS emissions FROM (' +
+      `SELECT ${bucketExpr('sv.scrape_time', resolution)} AS bucket, COALESCE(g.state, '') AS region, ` +
+      'f.factor AS factor, MAX(SUM(sv.value), 0) AS mw ' +
+      'FROM scada_values sv JOIN generators g ON g.id = sv.generator_id ' +
+      'LEFT JOIN emission_factors f ON f.duid = g.duid ' +
+      `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
+      'GROUP BY bucket, sv.generator_id, region, factor' +
+      ') GROUP BY bucket, region ORDER BY bucket ASC, region ASC LIMIT ? OFFSET ?';
+    binds = [...where.flatMap((c) => c.binds), limit, offset];
+  }
+
+  const { results } = await env.DB.prepare(sql)
+    .bind(...binds)
+    .all<IntensityRow>();
+
+  // Shape: bucket -> region -> totals, plus a NEM total accumulated as we go
+  // (Σ over regions of both halves of the ratio — NOT the mean of the regional
+  // intensities, which would weight a quiet Tasmania like a loaded NSW).
+  const byBucket = new Map<number, Map<string, IntensityTotals>>();
+  const regions = new Set<string>([NEM_KEY]);
+  for (const row of results) {
+    let bucket = byBucket.get(row.bucket);
+    if (bucket === undefined) byBucket.set(row.bucket, (bucket = new Map()));
+    bucket.set(row.region, { mwAll: row.mw_all, mwCovered: row.mw_covered, emissions: row.emissions });
+    regions.add(row.region);
+
+    const nem = bucket.get(NEM_KEY) ?? { mwAll: 0, mwCovered: 0, emissions: 0 };
+    nem.mwAll += row.mw_all;
+    nem.mwCovered += row.mw_covered;
+    nem.emissions += row.emissions;
+    bucket.set(NEM_KEY, nem);
+  }
+
+  const timestamps = [...byBucket.keys()].sort((a, b) => a - b);
+  // Official rows only exist (and only mean anything) at daily grain.
+  const official =
+    resolution === 86400 && timestamps.length > 0 ? await loadOfficialIndex(env, timestamps) : null;
+
+  // NEM first, then regions ascending — reading order, and the dashboard default.
+  const orderedRegions = [NEM_KEY, ...[...regions].filter((r) => r !== NEM_KEY).sort()];
+  const series = orderedRegions.map((key) => {
+    const values: (number | null)[] = [];
+    const coverage: (number | null)[] = [];
+    for (const t of timestamps) {
+      const totals = byBucket.get(t)?.get(key);
+      // No covered generation in the bucket is "no reading", never 0 gCO2/kWh.
+      values.push(totals === undefined || totals.mwCovered <= 0 ? null : round4(totals.emissions / totals.mwCovered));
+      coverage.push(totals === undefined || totals.mwAll <= 0 ? null : round4(totals.mwCovered / totals.mwAll));
+    }
+    const entry: Record<string, unknown> = { key, values, coverage };
+    if (official !== null) entry.official = timestamps.map((t) => official.get(`${t} ${key}`) ?? null);
+    return entry;
+  });
+
+  return json({
+    start: window.start ?? null,
+    end: window.end ?? null,
+    resolution,
+    unit: 'tCO2-e/MWh',
+    truncated: results.length === limit,
+    timestamps,
+    series,
+  });
+}
+
+function round4(n: number): number {
+  return Math.round(n * 1e4) / 1e4;
+}
+
+/** AEMO's official daily index for the covered buckets, keyed `bucket\0region`. */
+async function loadOfficialIndex(env: Env, timestamps: number[]): Promise<Map<string, number>> {
+  const { results } = await env.DB.prepare(
+    'SELECT settlement_date, region, intensity FROM cdeii_daily WHERE settlement_date >= ? AND settlement_date <= ?',
+  )
+    .bind(timestamps[0] - CDEII_DAY_SECONDS, timestamps[timestamps.length - 1] - CDEII_DAY_SECONDS)
+    .all<{ settlement_date: number; region: string; intensity: number }>();
+  return new Map(results.map((r) => [`${r.settlement_date + CDEII_DAY_SECONDS} ${r.region}`, r.intensity]));
+}
+
 async function handleGenerators(env: Env, params: URLSearchParams): Promise<Response> {
   const filters = generatorFilters(params);
   const where = filters.length > 0 ? ` WHERE ${filters.map((f) => f.sql).join(' AND ')}` : '';
@@ -480,8 +648,14 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         return await handleAggregate(env, url.searchParams);
       case '/api/v2/generators':
         return await handleGenerators(env, url.searchParams);
+      case '/api/v2/intensity':
+        return await handleIntensity(env, url.searchParams);
       default:
-        return jsonError(404, 'unknown route: available are /api/v2/values, /api/v2/values/aggregate, /api/v2/generators');
+        return jsonError(
+          404,
+          'unknown route: available are /api/v2/values, /api/v2/values/aggregate, ' +
+            '/api/v2/generators, /api/v2/intensity',
+        );
     }
   } catch (err) {
     if (err instanceof ApiError) return jsonError(err.status, err.message);

@@ -13,6 +13,7 @@
     "seed:generate": "node scripts/generate-seed.mjs",
     "refresh:generate": "node scripts/refresh-generators.mjs",
     "refresh:check": "node scripts/refresh-generators.mjs --self-check",
+    "reconcile": "node scripts/reconcile-cdeii.mjs",
     "refresh:local": "wrangler d1 execute nem-api-db --local --file=refresh-upsert.sql",
     "refresh:remote": "wrangler d1 execute nem-api-db --remote --file=refresh-upsert.sql",
     "migrate:local": "wrangler d1 migrations apply nem-api-db --local",

@@ -10,7 +10,7 @@ the weekly out-of-band generator-registration refresh from AEMO's live workbook.
 ## Query API (v2) — public
 
 `src/api.ts` — `GET /api/v2/values`, `GET /api/v2/values/aggregate?group_by=fuel|tech|region`,
-and `GET /api/v2/generators`, serving from D1. A **greenfields public
+`GET /api/v2/generators`, and `GET /api/v2/intensity`, serving from D1. A **greenfields public
 contract** (public until abuse is detected — ray, 2026-07-24; the legacy 2015
 API is reference-only): columnar lib-agnostic payload, period-ending NEM-time
 buckets (AEST, daily buckets end at AEST midnight), net-MW aggregate
@@ -296,6 +296,45 @@ mismatch. Deploy-ordering note: apply the migration and run this backfill
 re-run it once **after** the deploy — it converges the buckets ingested in
 the window between backfill and cutover (pre-deploy code did not maintain
 rollups yet).
+
+## Carbon intensity (LAB-1698)
+
+`/api/v2/intensity` computes Σ(MW × factor) / Σ(MW) per region and NEM-wide
+from AEMO's published CDEII emission factors joined to dispatch SCADA on DUID.
+The contract, the methodology and its disclosed biases live in
+[`API.md`](API.md) — that is the document to read before changing the maths.
+
+Two inputs, both from <https://nemweb.com.au/Reports/Current/CDEII/> and both
+upserted into `emission_factors` / `cdeii_daily`
+(`migrations/0005_emissions.sql`) by the **daily** `37 20 * * *` cron
+(`refreshCdeii`, `src/cdeii.ts`). The files republish weekly, so daily is
+generous; the refresh is pure upsert and never deletes, so a skipped or failed
+run costs nothing but freshness.
+
+Deploy ordering: the migration ships the tables **empty** on purpose (a
+committed seed would be a stale second copy of data AEMO restates). Until the
+first refresh runs, `/api/v2/intensity` honestly reports zero coverage and
+`null` values rather than a wrong number, so trigger it once right after
+applying the migration:
+
+```sh
+npx wrangler dev --remote --test-scheduled          # real D1 bindings
+curl "http://127.0.0.1:8787/__scheduled?cron=37+20+*+*+*"
+```
+
+**Reconciliation** — the honesty gate. Compares our estimate against AEMO's
+own official daily index (published under NER 3.13.14, republished in the
+same payload) for every region-day in the window:
+
+```sh
+node scripts/reconcile-cdeii.mjs --days 7           # or --base http://127.0.0.1:8787
+```
+
+Non-zero exit means a region-day drifted outside ±10% (or ±0.02 absolute,
+which is what matters on near-carbon-free days). Run it after any change to
+the factor join, the bucket math, or the refresh. The estimate reads a few
+percent high by construction — as-generated SCADA against sent-out factors —
+and is never silently corrected toward the official number.
 
 ## Migrations
 

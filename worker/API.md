@@ -189,6 +189,115 @@ straddling `time_start`/`time_end` reports the full bucket's mean rather than
 only the in-window portion. Exact `time=` lookups and resolutions
 `300`/`1800` read raw rows as before.
 
+## `GET /api/v2/intensity`
+
+**Grid carbon intensity per NEM region, and NEM-wide** — how much CO₂-e each
+MWh of dispatched generation carries, estimated at dispatch cadence from
+AEMO's own published emission factors. `tCO2-e/MWh` is numerically identical
+to the `gCO2-e/kWh` most consumers expect: multiply by 1000.
+
+```jsonc
+{
+  "start": 1784901600,
+  "end": 1784988000,
+  "resolution": 86400,
+  "unit": "tCO2-e/MWh",
+  "truncated": false,
+  "timestamps": [1784988000],
+  "series": [
+    // NEM first, then regions ascending.
+    { "key": "NEM",  "values": [0.6314], "coverage": [0.994], "official": [0.6005] },
+    { "key": "NSW1", "values": [0.6504], "coverage": [0.999], "official": [0.6329] }
+  ]
+}
+```
+
+- `values[i]` — the estimate for the bucket ending at `timestamps[i]`, 4 dp.
+  `null` means no generation with a published factor in that bucket, which is
+  never the same statement as `0`.
+- `coverage[i]` — the fraction of that bucket's dispatched MW that carried a
+  published factor (see *Coverage* below). `null` when there was no
+  generation at all.
+- `official[i]` — AEMO's own published daily index for the same region-day,
+  **present only at `resolution=86400`** (it does not exist at any finer
+  grain). `null` where AEMO has not published that day yet — the file
+  republishes weekly, so the last few days are normally null.
+
+Accepts the same time window and `resolution` parameters as `values`, plus
+`limit`/`offset`. It does **not** accept the generator filters or `sort`:
+intensity is defined per region and always returns every region, and the
+emissions of an arbitrary fuel subset over the output of that same subset is
+a confidently wrong number, not a useful one. Those params are ignored (and,
+like any unrecognised param, do not affect the cache key).
+
+### How it is computed
+
+Per bucket, per region:
+
+```
+intensity = Σ(MW × factor) / Σ(MW)     over generators with a published factor
+```
+
+energy-weighted — the same ratio-of-sums AEMO uses for its own index
+(`TOTAL_EMISSIONS / TOTAL_SENT_OUT_ENERGY`), which is what makes the two
+directly comparable. The NEM series is the ratio of the summed halves across
+regions, **not** the mean of the regional intensities: a quiet Tasmania must
+not weigh the same as a loaded New South Wales.
+
+Factors come from AEMO's CDEII report
+([`CO2EII_AVAILABLE_GENERATORS.CSV`](https://nemweb.com.au/Reports/Current/CDEII/),
+one per DUID, provenance `ISP2022` / `ISP2024` / `NGA`), refreshed daily and
+joined on DUID — no name matching. `MW` is the dispatch SCADA already behind
+`/api/v2/values`.
+
+**Negative MW.** A generator's *net* output over a bucket is clamped at zero,
+so a unit that is a net consumer in that bucket — a charging battery, a pump
+load, station draw — contributes to neither the numerator nor the
+denominator. It is not sending anything out. At `resolution=300` a bucket is
+one dispatch interval, so this is exactly "drop negative readings"; at
+coarser resolutions it is the per-generator net over the bucket, so a battery
+that charges more than it discharges within one hour drops out of that hour
+entirely. Leaving charging in the denominator would shrink it and inflate
+intensity — the wrong direction, and worst exactly when the grid is cleanest.
+
+**Coverage.** Generation from a DUID with *no* published factor is excluded
+from both halves of the ratio and disclosed in `coverage`. It is deliberately
+**not** treated as zero-emission, which would be a silent lie about a unit we
+know nothing about. In practice coverage runs 98–100%; the shortfall is a
+handful of pumped-hydro and small hydro units absent from AEMO's factor file
+(`PUMP2`, `KAREEYA3`, `KAREEYA4`, `SHPUMP`, `ROWALLAN`, `RUBICON`,
+`TULLYSM1`). All are zero- or near-zero-emission, so excluding them biases
+intensity very slightly **up**.
+
+### What this is not
+
+These are **estimates**, and they read a few percent high. Two disclosed
+reasons:
+
+- AEMO's factors are per MWh **sent out**; dispatch SCADA is **as-generated**.
+  Thermal plant carries 5–10% auxiliary load and wind/solar carries almost
+  none, so weighting by as-generated over-weights the emitting units. This is
+  the bulk of the gap and it is structurally one-directional.
+- Factors are static per unit, so part-load heat-rate variation is invisible;
+  and excluded unfactored generation (above) is near-zero-emission.
+
+Measured against AEMO's official index on 2026-08-08, over three sample days
+and all five regions plus NEM, every comparison sat between **+2.3% and
++9.6%**, with one exception: SA1 on 2026-07-01 read +18.1% — on an
+essentially carbon-free day where the official index was 0.0105, i.e. an
+absolute difference of 0.0019 tCO₂-e/MWh, about 2 g/kWh. Relative error is
+not a meaningful gate at that magnitude; `scripts/reconcile-cdeii.mjs` uses
+±10% **or** ±0.02 absolute, whichever is kinder, and prints every region-day
+so the raw numbers stay visible.
+
+The estimate is never silently corrected toward the official index. Both
+numbers are published side by side at daily resolution so the gap is the
+consumer's to see.
+
+**Caching note:** `official` values arrive through the daily CDEII refresh,
+while a fully-past window caches for 24 h — so a newly published official
+value can take up to a day to appear on an already-cached historical day.
+
 ## `GET /api/v2/generators`
 
 Filtered generator reference rows as a **bare JSON array**, ordered by `id`.

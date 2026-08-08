@@ -32,13 +32,32 @@ const REGIONS = [
 
 const TZ = 'Australia/Brisbane'; // NEM market time: AEST, UTC+10, never DST (not Sydney)
 const fmtMW = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
+// The API publishes tCO2-e/MWh; gCO2-e/kWh is the same number x1000 and is
+// what people actually quote, so the display unit converts and the axis says so.
+const fmtIntensity = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
 const fmtTime = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
 const fmtDate = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short' });
 
 const $ = (id) => document.getElementById(id);
 const chartEl = $('chart');
 
-const state = { region: '', payload: null, ordered: [], chart: null };
+const state = { region: '', payload: null, intensity: null, showIntensity: true, ordered: [], chart: null };
+
+/* Carbon intensity (LAB-1698) for the selected region, aligned to the fuel
+ * payload's buckets by TIMESTAMP rather than by index: both endpoints read the
+ * same dispatch data over the same default window so the axes normally match
+ * exactly, but a lookup degrades to a gap instead of silently shifting the
+ * overlay if they ever don't. Returns null when the overlay has nothing to
+ * draw, which is also the honest state before the first CDEII refresh runs. */
+function intensityForRegion() {
+  const { intensity, payload } = state;
+  if (!intensity || !payload) return null;
+  const series = intensity.series.find((s) => s.key === (state.region || 'NEM'));
+  if (!series) return null;
+  const byTime = new Map(intensity.timestamps.map((t, i) => [t, series.values[i]]));
+  const values = payload.timestamps.map((t) => byTime.get(t) ?? null);
+  return values.some((v) => v != null) ? values : null;
+}
 
 function currentTheme() {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -49,6 +68,7 @@ function chartTokens() {
     surface: style.getPropertyValue('--chart-surface').trim(),
     grid: style.getPropertyValue('--chart-grid').trim(),
     axisInk: style.getPropertyValue('--chart-axis-ink').trim(),
+    intensityInk: style.getPropertyValue('--chart-intensity-ink').trim(),
   };
 }
 
@@ -60,6 +80,12 @@ function renderChart() {
   const theme = currentTheme();
   const tokens = chartTokens();
   const { data, seriesOpts, bands } = buildStack(state.ordered, theme, tokens.surface, state.payload.timestamps);
+
+  // Intensity rides a SECOND y scale (different unit entirely) and is appended
+  // last, so it draws on top of the stack and cannot disturb the band indices
+  // buildStack computed — bands only ever reference series already in place.
+  const intensityValues = state.showIntensity ? intensityForRegion() : null;
+
   const width = chartEl.clientWidth || 640;
   const height = Math.max(280, Math.min(420, Math.round(width * 0.45)));
   const axis = {
@@ -67,6 +93,39 @@ function renderChart() {
     grid: { stroke: tokens.grid, width: 1 },
     ticks: { stroke: tokens.grid, width: 1 },
   };
+
+  const intensityAxes = [];
+  if (intensityValues) {
+    const gPerKwh = intensityValues.map((v) => (v == null ? null : v * 1000));
+    // Drawn as a CASING (wide surface-colour stroke) under the ink line. No
+    // single ink clears 3:1 against every fuel fill in both themes — the
+    // palette deliberately spans a lightness band in both directions, so any
+    // ink sits close to something (measured: near-black is 2.13:1 on the light
+    // battery violet, near-white 2.14:1 on the dark gray). A casing makes the
+    // ink's immediate surround the surface colour instead of whatever band it
+    // happens to cross, which is 18:1 light / 14:1 dark everywhere. Same
+    // mechanism as the 1px surface separator between stacked bands.
+    data.push(gPerKwh);
+    seriesOpts.push({ scale: 'i', stroke: tokens.surface, width: 5, points: { show: false } });
+    data.push(gPerKwh);
+    seriesOpts.push({
+      label: 'Carbon intensity',
+      scale: 'i',
+      stroke: tokens.intensityInk,
+      width: 2,
+      points: { show: false },
+    });
+    intensityAxes.push({
+      ...axis,
+      scale: 'i',
+      side: 1,
+      label: 'gCO₂-e/kWh (est.)',
+      size: 62,
+      // The left axis already rules the plot; a second grid would be noise.
+      grid: { show: false },
+      values: (u, vals) => vals.map((v) => fmtIntensity.format(v)),
+    });
+  }
 
   state.chart = new uPlot({
     width,
@@ -78,10 +137,14 @@ function renderChart() {
     bands,
     scales: {
       y: { range: (u, min, max) => [min < 0 ? min * 1.06 : 0, max > 0 ? max * 1.04 : 1] },
+      // Anchored at zero: intensity is a magnitude against a carbon-free
+      // floor, and an auto-zoomed baseline would exaggerate small swings.
+      i: { range: (u, min, max) => [0, max > 0 ? max * 1.1 : 1] },
     },
     axes: [
       { ...axis, label: 'Time (AEST)', labelSize: 22 },
       { ...axis, label: 'MW (net)', size: 64, values: (u, vals) => vals.map((v) => fmtMW.format(v)) },
+      ...intensityAxes,
     ],
     cursor: { y: false, points: { show: false } },
     legend: { show: false },
@@ -135,10 +198,53 @@ function renderReadout(cursorIdx) {
   totalVal.textContent = sawValue ? fmtMW.format(total) : '—';
   totalRow.append(totalName, totalVal);
   readout.append(totalRow);
+
+  // Intensity gets a readout row on the same terms as every fuel: a value
+  // reachable without hovering, which is what relieves the two sub-3:1 fills.
+  // It follows the overlay toggle — a line swatch pointing at a line that is
+  // not drawn is worse than no row, and the headline stat carries the number
+  // regardless.
+  const intensityValues = state.showIntensity ? intensityForRegion() : null;
+  if (intensityValues) {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2 font-semibold';
+    const line = document.createElement('span');
+    line.className = 'inline-block h-0.5 w-3 shrink-0';
+    line.style.backgroundColor = chartTokens().intensityInk;
+    const name = document.createElement('span');
+    name.className = 'truncate';
+    name.textContent = 'gCO₂-e/kWh';
+    const val = document.createElement('span');
+    val.className = 'ms-auto tabular-nums';
+    const v = intensityValues[idx];
+    val.textContent = v == null ? '—' : fmtIntensity.format(v * 1000);
+    row.append(line, name, val);
+    readout.append(row);
+  }
+}
+
+/* Latest intensity for the selected region, straight from the intensity
+ * payload rather than the aligned overlay — the stat should show the freshest
+ * reading even if the two windows ever disagree at the edge. */
+function renderHeroIntensity() {
+  const el = $('hero-intensity');
+  const series = state.intensity?.series.find((s) => s.key === (state.region || 'NEM'));
+  const latest = series?.values.reduce((acc, v) => (v == null ? acc : v), null) ?? null;
+  el.textContent = latest == null ? '—' : `${fmtIntensity.format(latest * 1000)} g`;
+  // Coverage is part of the number's meaning, not a footnote: say so on hover.
+  const i = series ? series.values.findLastIndex((v) => v != null) : -1;
+  const coverage = i >= 0 ? series.coverage[i] : null;
+  el.title =
+    latest == null
+      ? 'No emission factors matched this window — see the method note below.'
+      : `gCO₂-e per kWh, estimated. ${
+          coverage == null ? '' : `${(coverage * 100).toFixed(1)}% of dispatched MW carried a published factor. `
+        }Reads a few percent high (as-generated vs sent-out).`;
 }
 
 function renderHero() {
   const { payload, ordered } = state;
+  renderHeroIntensity();
   const n = payload ? payload.timestamps.length : 0;
   if (n === 0) {
     $('hero-total').textContent = '—';
@@ -182,7 +288,18 @@ async function load(region) {
   chartEl.classList.add('opacity-50'); // refetch keeps the previous frame
   chartEl.setAttribute('aria-busy', 'true');
   try {
-    const res = await fetch(url);
+    // Intensity carries no region param — the endpoint always returns every
+    // region, so one cached response serves the whole selector. Its failure is
+    // isolated: an overlay that can't load must not take the fuel mix with it.
+    const [res, intensity] = await Promise.all([
+      fetch(url),
+      fetch('/api/v2/intensity')
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .catch((err) => {
+          console.error('carbon-intensity load failed:', err);
+          return null;
+        }),
+    ]);
     if (!res.ok) {
       let detail = `HTTP ${res.status}`;
       try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }
@@ -191,6 +308,7 @@ async function load(region) {
     const payload = await res.json();
     if (loadId !== activeLoad) return;
     state.payload = payload;
+    state.intensity = intensity;
     state.region = region;
     $('error-alert').classList.add('hidden');
     render();
@@ -258,6 +376,14 @@ new ResizeObserver(() => {
 }).observe(chartEl);
 
 $('error-retry').addEventListener('click', () => load(state.region));
+
+// Toggling the overlay is pure re-render — the payload is already in hand.
+$('intensity-toggle').addEventListener('change', (e) => {
+  state.showIntensity = e.target.checked;
+  if (!state.payload) return;
+  renderChart();
+  renderReadout(null);
+});
 
 initTheme();
 renderRegionFilter();
