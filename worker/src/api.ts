@@ -528,8 +528,10 @@ async function handleIntensity(env: Env, params: URLSearchParams): Promise<Respo
     if (window.start !== undefined) where.push({ sql: 'r.bucket >= ?', binds: [nemBucket(window.start, resolution)] });
     if (window.end !== undefined) where.push({ sql: 'r.bucket <= ?', binds: [nemBucket(window.end, resolution)] });
     where.push(...filters);
+    // g.state is NOT NULL today — the COALESCE (both branches) is belt-and-
+    // braces so no future schema change can ever publish a null series key.
     sql =
-      `SELECT r.bucket AS bucket, g.state AS region, ${sums('r.sum_value')}` +
+      `SELECT r.bucket AS bucket, COALESCE(g.state, '') AS region, ${sums('r.sum_value')}` +
       `FROM ${table} r JOIN generators g ON g.id = r.generator_id ` +
       factorJoin +
       `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
@@ -539,7 +541,7 @@ async function handleIntensity(env: Env, params: URLSearchParams): Promise<Respo
     const where: SqlFragment[] = [{ sql: 'sv.value > 0', binds: [] }];
     where.push(...timeClauses(window, 'sv.scrape_time'), ...filters);
     sql =
-      `SELECT ${bucketExpr('sv.scrape_time', resolution)} AS bucket, g.state AS region, ${sums('sv.value')}` +
+      `SELECT ${bucketExpr('sv.scrape_time', resolution)} AS bucket, COALESCE(g.state, '') AS region, ${sums('sv.value')}` +
       'FROM scada_values sv JOIN generators g ON g.id = sv.generator_id ' +
       factorJoin +
       `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
@@ -565,11 +567,8 @@ async function handleIntensity(env: Env, params: URLSearchParams): Promise<Respo
     mwF: new Array<number>(timestamps.length).fill(0),
     em: new Array<number>(timestamps.length).fill(0),
   });
-  // NEM synthesized only when there is data — an empty window returns
-  // `series: []`, not a hollow NEM series.
   const byRegion = new Map<string, Acc>();
   const nem = blank();
-  if (results.length > 0) byRegion.set('NEM', nem);
   for (const row of results) {
     // index is built from these same rows' buckets — a miss is an invariant
     // break; silently skipping would publish a wrong regional/NEM intensity.
@@ -586,6 +585,11 @@ async function handleIntensity(env: Env, params: URLSearchParams): Promise<Respo
       a.em[i] += row.em;
     }
   }
+  // NEM synthesized only when there is data — an empty window returns
+  // `series: []`, not a hollow NEM series. Inserted AFTER accumulation so a
+  // generator row keyed 'NEM' can never alias the synthesized total and be
+  // double-counted; the explicit sort below owns the output order.
+  if (results.length > 0) byRegion.set('NEM', nem);
 
   const series = [...byRegion.entries()]
     .sort(([a], [b]) => (a === 'NEM' ? -1 : b === 'NEM' ? 1 : a < b ? -1 : 1))

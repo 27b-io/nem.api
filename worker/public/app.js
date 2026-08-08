@@ -282,13 +282,21 @@ async function load(region) {
       throw new Error(detail);
     }
     const payload = await res.json();
-    const intensity = await fetchIntensity(region, payload.timestamps);
     if (loadId !== activeLoad) return;
     state.payload = payload;
-    state.intensity = intensity;
+    state.intensity = null;
     state.region = region;
     $('error-alert').classList.add('hidden');
     render();
+
+    // Overlay is best-effort: never gate the fuel view on it (browser fetch
+    // has no default timeout). fetchIntensity resolves null on any failure,
+    // so this .then never rejects; the loadId check drops stale responses.
+    void fetchIntensity(region, payload.timestamps).then((intensity) => {
+      if (loadId !== activeLoad) return;
+      state.intensity = intensity;
+      render();
+    });
   } catch (err) {
     if (loadId !== activeLoad) return;
     console.error('fuel-mix load failed:', err);

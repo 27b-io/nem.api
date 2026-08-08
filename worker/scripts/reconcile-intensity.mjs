@@ -28,10 +28,15 @@ const ABS_CUTOFF = 0.05;
 const args = process.argv.slice(2);
 const argOf = (name, dflt) => {
   const i = args.indexOf(name);
-  return i === -1 ? dflt : args[i + 1];
+  if (i === -1) return dflt;
+  const value = args[i + 1];
+  if (value === undefined || value.startsWith('--')) throw new Error(`${name} requires a value`);
+  return value;
 };
 const API = argOf('--api', 'https://nem.27b.io');
 const TOLERANCE = Number(argOf('--tolerance', '0.10'));
+// NaN tolerance makes every relative check false → a misleading blanket FAIL.
+if (!Number.isFinite(TOLERANCE) || TOLERANCE <= 0) throw new Error('--tolerance must be a positive number');
 const DAYS = argOf('--days', '2026-07-29,2026-07-30,2026-07-31').split(',');
 
 /** RFC-4180-ish split (mirror of src/emissions.ts splitCsvLine). */
@@ -121,14 +126,27 @@ function selfCheck() {
   console.log('self-check passed');
 }
 
+const FETCH_TIMEOUT_MS = 30_000;
+
 async function fetchText(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
-  return res.text();
+  // Single network choke point for the whole harness. The timeout signal
+  // covers the body read too — a mid-body stall must not hang the gate.
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } catch (err) {
+    throw new Error(`fetch failed: ${url}: ${err instanceof Error ? err.message : err}`, { cause: err });
+  }
 }
 
 async function fetchJson(url) {
-  return JSON.parse(await fetchText(url));
+  const text = await fetchText(url);
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(`invalid JSON from ${url}: ${err instanceof Error ? err.message : err}`, { cause: err });
+  }
 }
 
 async function main() {
