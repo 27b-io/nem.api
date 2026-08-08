@@ -15,16 +15,22 @@
 // use it as a gate.
 
 const arg = (name, fallback) => {
+  // Accept both `--name value` and `--name=value` — an unmatched equals form
+  // must not silently fall through to the default and reconcile the wrong
+  // window (a silently-wrong scope is worse than a usage error on a gate).
+  const eq = process.argv.find((a) => a.startsWith(`--${name}=`));
+  if (eq !== undefined) return eq.slice(name.length + 3);
   const i = process.argv.indexOf(`--${name}`);
   return i < 0 ? fallback : process.argv[i + 1];
 };
 
 const BASE = arg('base', 'https://nem.27b.io');
 const DAYS = Number(arg('days', 7));
-if (!Number.isFinite(DAYS) || DAYS <= 0) {
-  // Catch `--days` as the last argument (undefined → NaN) and `--days abc`
-  // here as a usage error, not downstream as an opaque HTTP 400.
-  console.error('--days must be a positive number');
+if (!Number.isInteger(DAYS) || DAYS <= 0) {
+  // Catch `--days` as the last argument (undefined → NaN), `--days abc`, and
+  // `--days 1.5` (the API's relative windows accept ^\d+$ only) here as a
+  // usage error, not downstream as an opaque HTTP 400.
+  console.error('--days must be a positive integer');
   process.exit(2);
 }
 
@@ -51,6 +57,14 @@ try {
 if (!res.ok) {
   console.error(`HTTP ${res.status} fetching ${url}`);
   process.exit(2);
+}
+if (res.headers.get('x-cache') === 'HIT') {
+  // A relative window is cached only to the next 5-min dispatch boundary, so
+  // a HIT is an internally-consistent snapshot: its verdict is sound for the
+  // data it compared. But a run immediately after a refresh or code change
+  // reconciles the PRE-change state — say so, or the operator debugs a
+  // false discrepancy (or trusts a stale pass).
+  console.error('note: cached response (≤ one 5-min dispatch boundary old); re-run after the boundary to reconcile post-refresh data');
 }
 const body = await res.json();
 if (body.series?.[0]?.official === undefined) {

@@ -243,12 +243,15 @@ function renderReadout(cursorIdx) {
  * reading even if the two windows ever disagree at the edge. */
 function renderHeroIntensity() {
   const el = $('hero-intensity');
+  const coverageEl = $('hero-coverage');
+  // Both ids ship statically in index.html; guard once so a missing element
+  // skips the whole stat rather than half-rendering it (Kody null-check rule).
+  if (!el || !coverageEl) return;
   const series = state.intensity?.series.find((s) => s.key === (state.region || 'NEM'));
   // One scan: the value and the coverage MUST come from the same bucket, or
   // the tooltip attributes a coverage figure to a reading it doesn't describe.
   const i = series ? series.values.findLastIndex((v) => v != null) : -1;
   el.textContent = i < 0 ? '—' : `${fmtMW.format(series.values[i] * G_PER_KWH)} g`;
-  const coverageEl = $('hero-coverage');
   if (i >= 0) {
     // Coverage is part of the number's meaning, not a footnote: render it as
     // visible text (title alone is unreachable for keyboard/touch/AT users).
