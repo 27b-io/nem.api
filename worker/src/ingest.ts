@@ -104,7 +104,9 @@ const NEMWEB_FETCH_TIMEOUT_MS = 120_000;
  * Transport errors (incl. the deadline's bare "operation was aborted"
  * DOMException, which names neither URL nor cause) are mapped here — the one
  * choke point — to an Error carrying the URL, so every catch layer up the
- * stack (per-file, per-day, per-feed) logs an actionable message. Callers
+ * stack (per-file, per-day, per-feed) logs an actionable message. A body-read
+ * stall aborts at the caller's arrayBuffer() instead and surfaces unmapped —
+ * there the per-file/per-day catch supplies the filename context. Callers
  * deliberately do NOT catch: throwing to those layers is the designed
  * ledger-write-last retry contract.
  */

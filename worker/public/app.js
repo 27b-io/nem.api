@@ -320,17 +320,22 @@ async function load(region, range) {
   chartEl.classList.add('opacity-50'); // refetch keeps the previous frame
   chartEl.setAttribute('aria-busy', 'true');
   try {
+    const wantedDispatch = overlaysWanted(); // sampled now: a toggle can land mid-flight
     const [payload, dispatch] = await Promise.all([
       fetchJson(url),
       // A dispatch failure must never take the fuel-mix chart down with it:
       // degrade to a missing overlay (readout shows "—") and log it.
-      overlaysWanted()
+      wantedDispatch
         ? fetchDispatch(range).catch((err) => { console.error('dispatch overlay refresh failed:', err); return null; })
         : Promise.resolve(null),
     ]);
     if (loadId !== activeLoad) return;
     state.payload = payload;
-    state.dispatch = dispatch; // null when no overlay is on — refetched fresh at first toggle
+    // Assign only when this load's dispatch arm was real (fetched — null then
+    // means failed, degrade honestly) or overlays are still off (null clears
+    // any stale payload). An overlay toggled ON mid-flight fetches under this
+    // same loadId; its result must not be clobbered by our null placeholder.
+    if (wantedDispatch || !overlaysWanted()) state.dispatch = dispatch;
     $('error-alert').classList.add('hidden');
     render();
   } catch (err) {
@@ -424,7 +429,6 @@ function initOverlays() {
       renderReadout(null);
     });
   }
-  updateOverlayControls();
 }
 
 // Theme toggle: explicit choice persists; OS changes apply only while the
