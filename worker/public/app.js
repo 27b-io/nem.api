@@ -253,10 +253,12 @@ function renderHeroIntensity() {
     // Coverage is part of the number's meaning, not a footnote: render it as
     // visible text (title alone is unreachable for keyboard/touch/AT users).
     const coverage = series.coverage?.[i];
-    coverageEl.textContent = coverage == null ? '' : `${(coverage * 100).toFixed(1)}% factor coverage`;
+    // FLOOR, never round: 99.96% coverage must not display as "100.0%".
+    const pct = coverage == null ? null : (Math.floor(coverage * 1000) / 10).toFixed(1);
+    coverageEl.textContent = pct == null ? '' : `${pct}% factor coverage`;
     el.title =
       `gCO₂-e per kWh, estimated. ${
-        coverage == null ? '' : `${(coverage * 100).toFixed(1)}% of dispatched MW carried a published factor. `
+        pct == null ? '' : `${pct}% of dispatched MW carried a published factor. `
       }Reads a few percent high (as-generated vs sent-out).`;
   } else {
     coverageEl.textContent = '';
