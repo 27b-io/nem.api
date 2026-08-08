@@ -2,7 +2,7 @@ import { env } from 'cloudflare:test';
 import { strToU8, zipSync } from 'fflate';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ingestDaily, runBackfill } from '../src/backfill';
-import { loadDuidMap } from '../src/ingest';
+import { DISPATCH_IS_FEED, SCADA_FEED } from '../src/ingest';
 
 // Tests run in the same isolate as the code under test, so stubbing global
 // fetch covers the module's outbound HTTP (bindings like D1/R2 don't route
@@ -17,6 +17,8 @@ beforeEach(async () => {
     env.DB.prepare('DELETE FROM scada_hourly'),
     env.DB.prepare('DELETE FROM scada_daily'),
     env.DB.prepare('DELETE FROM scada_intervals'),
+    env.DB.prepare('DELETE FROM dispatch_region'),
+    env.DB.prepare('DELETE FROM dispatch_interconnector'),
     env.DB.prepare('DELETE FROM scrape'),
   ]);
   const archived = await env.ARCHIVE.list({ prefix: 'archive/' });
@@ -104,7 +106,7 @@ describe('runBackfill', () => {
     interceptListing(dates);
     for (const d of dates) interceptDaily(d, buildDailyZip(d, 3, [...KNOWN_DUIDS, ['FAKESF1', 1.0]]));
 
-    const run = await runBackfill(env);
+    const run = await runBackfill(env, SCADA_FEED);
     expect(run).toEqual({ ok: 2, failed: 0, values: 12, remaining: 0 });
 
     // 2 days × 3 intervals × 2 known DUIDs; the unknown FAKESF1 rows dropped.
@@ -151,12 +153,12 @@ describe('runBackfill', () => {
     interceptListing(['20260101', '20260102']);
     interceptDaily('20260102', buildDailyZip('20260102', 2)); // no interceptor for 20260101 — a fetch would fail
 
-    const run = await runBackfill(env);
+    const run = await runBackfill(env, SCADA_FEED);
     expect(run).toEqual({ ok: 1, failed: 0, values: 4, remaining: 0 });
 
     // Fully idle second pass: nothing fetched beyond the listing, nothing failed.
     interceptListing(['20260101', '20260102']);
-    expect(await runBackfill(env)).toEqual({ ok: 0, failed: 0, values: 0, remaining: 0 });
+    expect(await runBackfill(env, SCADA_FEED)).toEqual({ ok: 0, failed: 0, values: 0, remaining: 0 });
   });
 
   it('five-minute CURRENT ledger entries do not mask a daily archive', async () => {
@@ -168,7 +170,7 @@ describe('runBackfill', () => {
     interceptListing(['20260101']);
     interceptDaily('20260101', buildDailyZip('20260101', 2));
 
-    const run = await runBackfill(env);
+    const run = await runBackfill(env, SCADA_FEED);
     expect(run.ok).toBe(1);
     expect(await ledgerFilenames()).toContain('PUBLIC_DISPATCHSCADA_20260101.zip');
   });
@@ -177,9 +179,88 @@ describe('runBackfill', () => {
     await env.ARCHIVE.put('archive/PUBLIC_DISPATCHSCADA_20260101.zip', buildDailyZip('20260101', 2));
     interceptListing(['20260101']); // no zip interceptor — NEMWEB fetch would throw
 
-    const run = await runBackfill(env);
+    const run = await runBackfill(env, SCADA_FEED);
     expect(run).toEqual({ ok: 1, failed: 0, values: 4, remaining: 0 });
     expect(await ledgerFilenames()).toEqual(['PUBLIC_DISPATCHSCADA_20260101.zip']);
+  });
+});
+
+describe('runBackfill — DispatchIS feed (LAB-1700)', () => {
+  const DIS_LISTING = 'https://nemweb.com.au/Reports/Archive/DispatchIS_Reports/';
+
+  function dispatchIsCsv(date: string, i: number): string {
+    const ts = settlement(date, i);
+    return [
+      `C,NEMP.WORLD,DISPATCHIS,AEMO,PUBLIC,${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6, 8)},00:00:00,1,DISPATCHIS,1`,
+      'I,DISPATCH,PRICE,5,SETTLEMENTDATE,RUNNO,REGIONID,DISPATCHINTERVAL,INTERVENTION,RRP',
+      `D,DISPATCH,PRICE,5,"${ts}",1,NSW1,1,0,110.5`,
+      `D,DISPATCH,PRICE,5,"${ts}",1,SA1,1,0,-8.5`,
+      'I,DISPATCH,REGIONSUM,9,SETTLEMENTDATE,RUNNO,REGIONID,DISPATCHINTERVAL,INTERVENTION,TOTALDEMAND',
+      `D,DISPATCH,REGIONSUM,9,"${ts}",1,NSW1,1,0,9000`,
+      `D,DISPATCH,REGIONSUM,9,"${ts}",1,SA1,1,0,1700`,
+      'I,DISPATCH,INTERCONNECTORRES,3,SETTLEMENTDATE,RUNNO,INTERCONNECTORID,DISPATCHINTERVAL,INTERVENTION,METEREDMWFLOW',
+      `D,DISPATCH,INTERCONNECTORRES,3,"${ts}",1,V-SA,1,0,-79.3`,
+      '',
+    ].join('\r\n');
+  }
+
+  function buildDispatchIsDaily(date: string, intervals: number): Uint8Array {
+    const inner: Record<string, Uint8Array> = {};
+    for (let i = 0; i < intervals; i++) {
+      const ts = settlement(date, i).replace(/[/ :]/g, '').slice(0, 12);
+      const name = `PUBLIC_DISPATCHIS_${ts}_00000000000000${String(i).padStart(2, '0')}`;
+      inner[`${name}.zip`] = zipSync({ [`${name}.CSV`]: strToU8(dispatchIsCsv(date, i)) });
+    }
+    return zipSync(inner);
+  }
+
+  it('ingests a DispatchIS daily archive end to end: D1 rows, R2 raw zip, ledger', async () => {
+    routes.set(DIS_LISTING, () => new Response(
+      '<html><body><pre>' +
+        '<A HREF="/Reports/Archive/DispatchIS_Reports/PUBLIC_DISPATCHIS_20260101.zip">PUBLIC_DISPATCHIS_20260101.zip</A><br>' +
+        '</pre></body></html>',
+      { headers: { 'content-type': 'text/html' } },
+    ));
+    routes.set(`${DIS_LISTING}PUBLIC_DISPATCHIS_20260101.zip`, () => new Response(buildDispatchIsDaily('20260101', 3)));
+
+    const run = await runBackfill(env, DISPATCH_IS_FEED);
+    // 3 intervals × (2 region rows + 1 interconnector row).
+    expect(run).toEqual({ ok: 1, failed: 0, values: 9, remaining: 0 });
+
+    const expected = Date.UTC(2026, 0, 1, 0, 5, 0) / 1000 - 10 * 3600;
+    const nsw = await env.DB.prepare(
+      "SELECT rrp, total_demand FROM dispatch_region WHERE settlement_time = ? AND region = 'NSW1'",
+    )
+      .bind(expected)
+      .first<{ rrp: number; total_demand: number }>();
+    expect(nsw).toEqual({ rrp: 110.5, total_demand: 9000 });
+    const flow = await env.DB.prepare(
+      "SELECT metered_mw_flow FROM dispatch_interconnector WHERE settlement_time = ? AND interconnector = 'V-SA'",
+    )
+      .bind(expected)
+      .first<{ metered_mw_flow: number }>();
+    expect(flow?.metered_mw_flow).toBe(-79.3);
+
+    expect(await env.ARCHIVE.head('archive/PUBLIC_DISPATCHIS_20260101.zip')).not.toBeNull();
+    expect(await ledgerFilenames()).toEqual(['PUBLIC_DISPATCHIS_20260101.zip']);
+  });
+
+  it("one feed's ledger entries never mask the other's dailies for the same date", async () => {
+    // A SCADA daily for the same date sorts inside the DispatchIS range scan;
+    // the per-feed GLOB must keep them apart.
+    await env.DB.prepare("INSERT INTO scrape (filename, ingested_at) VALUES ('PUBLIC_DISPATCHSCADA_20260101.zip', 1)")
+      .run();
+    routes.set(DIS_LISTING, () => new Response(
+      '<html><body><pre>' +
+        '<A HREF="/Reports/Archive/DispatchIS_Reports/PUBLIC_DISPATCHIS_20260101.zip">PUBLIC_DISPATCHIS_20260101.zip</A><br>' +
+        '</pre></body></html>',
+      { headers: { 'content-type': 'text/html' } },
+    ));
+    routes.set(`${DIS_LISTING}PUBLIC_DISPATCHIS_20260101.zip`, () => new Response(buildDispatchIsDaily('20260101', 2)));
+
+    const run = await runBackfill(env, DISPATCH_IS_FEED);
+    expect(run.ok).toBe(1);
+    expect(await ledgerFilenames()).toEqual(['PUBLIC_DISPATCHIS_20260101.zip', 'PUBLIC_DISPATCHSCADA_20260101.zip']);
   });
 });
 
@@ -193,7 +274,7 @@ describe('ingestDaily', () => {
     });
     await env.ARCHIVE.put('archive/PUBLIC_DISPATCHSCADA_20260101.zip', zip);
 
-    const stats = await ingestDaily(env, 'PUBLIC_DISPATCHSCADA_20260101.zip', await loadDuidMap(env.DB));
+    const stats = await ingestDaily(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip');
     expect(stats).toMatchObject({ innerFiles: 2, skippedInner: 1, values: 2, intervals: 1, source: 'r2' });
     expect(await valueCount()).toBe(2);
     expect(await ledgerFilenames()).toEqual(['PUBLIC_DISPATCHSCADA_20260101.zip']);
@@ -206,9 +287,9 @@ describe('ingestDaily', () => {
     });
     interceptDaily('20260101', zip);
 
-    await expect(ingestDaily(env, 'PUBLIC_DISPATCHSCADA_20260101.zip', await loadDuidMap(env.DB))).rejects.toThrow(
-      /no UNIT_SCADA rows/,
-    );
+    await expect(
+      ingestDaily(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip'),
+    ).rejects.toThrow(/no usable rows/);
     expect(await ledgerFilenames()).toEqual([]);
     expect(await env.ARCHIVE.head('archive/PUBLIC_DISPATCHSCADA_20260101.zip')).toBeNull();
   });

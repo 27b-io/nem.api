@@ -33,6 +33,7 @@ import type { Env } from './index';
 import { nemBucket } from './rollups';
 import {
   CORS_HEADERS,
+  DISPATCH_FILTERS,
   firstParam,
   GENERATOR_FILTERS,
   handleApi,
@@ -133,10 +134,10 @@ function responseHeaders(maxAge: number, expires: number, xCache: 'HIT' | 'MISS'
   return headers;
 }
 
-/** Canonical generator-filter key parts; comma lists sort (IN() is unordered). */
-function filterParts(params: URLSearchParams): string[] {
+/** Canonical filter key parts; comma lists sort (IN() is unordered). */
+function filterParts(params: URLSearchParams, filters: Array<{ column: string; aliases: string[] }>): string[] {
   const parts: string[] = [];
-  for (const { column, aliases } of GENERATOR_FILTERS) {
+  for (const { column, aliases } of filters) {
     const raw = firstParam(params, aliases);
     if (raw === undefined) continue;
     const value = raw.includes(',')
@@ -168,9 +169,14 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
 
   try {
     if (route === '/api/v2/generators') {
-      parts.push(...filterParts(params));
+      parts.push(...filterParts(params, GENERATOR_FILTERS));
       ttl = GENERATORS_TTL_SECONDS;
-    } else if (route === '/api/v2/values' || route === '/api/v2/values/aggregate' || route === '/api/v2/intensity') {
+    } else if (
+      route === '/api/v2/values' ||
+      route === '/api/v2/values/aggregate' ||
+      route === '/api/v2/dispatch' ||
+      route === '/api/v2/intensity'
+    ) {
       if (route === '/api/v2/values/aggregate') {
         // group_by is echoed verbatim in the body, so `region` and its
         // storage alias `state` are distinct responses — no collapsing here.
@@ -202,9 +208,14 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
       // resolution floor instead. For that route these are unrecognised params
       // and stay out of the key like any other, so `?limit=5` cannot mint a
       // second entry for a byte-identical response.
-      if (route !== '/api/v2/intensity') {
+      if (route === '/api/v2/dispatch') {
+        // dispatch has no sort and only the region filter — a `sort=` or
+        // `fuel=` the handler ignores must not fragment the cache.
         const { limit, offset } = resolveLimit(params);
-        parts.push(`lim=${limit}`, `off=${offset}`, `ord=${resolveOrder(params)}`, ...filterParts(params));
+        parts.push(`lim=${limit}`, `off=${offset}`, ...filterParts(params, DISPATCH_FILTERS));
+      } else if (route !== '/api/v2/intensity') {
+        const { limit, offset } = resolveLimit(params);
+        parts.push(`lim=${limit}`, `off=${offset}`, `ord=${resolveOrder(params)}`, ...filterParts(params, GENERATOR_FILTERS));
       }
 
       // Upper bound of the data the window can see (t = exact matches only).
@@ -213,10 +224,16 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
       // Rollup-served responses (LAB-1696 aggregate, LAB-1698 intensity)
       // return the FULL bucket straddling `time_end`, so the response keeps
       // changing until that bucket completes — the closed test must clear the
-      // bucket end, not just `time_end`. `/values` is raw at every resolution
-      // and clips to the window, so it is excluded by route, but the ROUTING
-      // condition itself comes from api.ts so it cannot drift here.
-      if (upper !== undefined && route !== '/api/v2/values' && servedFromRollups(window, resolution)) {
+      // bucket end, not just `time_end`. `/values` and `/dispatch` read raw
+      // rows at every resolution and clip to the window, so they are excluded
+      // by route (allowlist, so a future raw route cannot inherit this by
+      // default); the rollup ROUTING condition itself comes from api.ts so it
+      // cannot drift here.
+      if (
+        upper !== undefined &&
+        (route === '/api/v2/values/aggregate' || route === '/api/v2/intensity') &&
+        servedFromRollups(window, resolution)
+      ) {
         upper = nemBucket(upper, resolution);
       }
       // Closed = every sample the response can ever reflect has been

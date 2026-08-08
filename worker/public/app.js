@@ -23,6 +23,7 @@
  * Known WARNs, both relieved by the always-visible readout values (the
  * mandated relief channel): solar #eda100 is 2.17:1 on white; fossil #8f4d0f
  * is 2.44:1 on the dark surface. */
+import { alignOverlays, OVERLAY_INKS } from './overlays.js';
 import { buildStack, orderSeries } from './stacking.js';
 import { bucketLabel, DEFAULT_RANGE, RANGES, rangeQuery } from './ranges.js';
 
@@ -33,6 +34,7 @@ const REGIONS = [
 
 const TZ = 'Australia/Brisbane'; // NEM market time: AEST, UTC+10, never DST (not Sydney)
 const fmtMW = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
+const fmtPrice = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 2 });
 // The API publishes tCO2-e/MWh; gCO2-e/kWh is the same number x1000 and is what
 // people actually quote, so every intensity display site multiplies and every
 // label says gCO2-e/kWh.
@@ -40,12 +42,25 @@ const G_PER_KWH = 1000;
 const fmtTime = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
 const fmtDate = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short' });
 
+/** "-$60" reads better than "$-60" on an axis; `fmt` picks the precision. */
+const dollars = (v, fmt = fmtMW) => (v < 0 ? `-$${fmt.format(-v)}` : `$${fmt.format(v)}`);
+
+// Price-axis tick candidates: symmetric pseudo-log steps to match the asinh
+// scale (uPlot distr 4) the price overlay renders on — a $17,500 spike and a
+// -$60 trough both stay readable. Filtered to the visible range at render.
+const PRICE_SPLITS = [-30000, -10000, -3000, -1000, -300, -100, -30, 0, 30, 100, 300, 1000, 3000, 10000, 30000];
+
 const $ = (id) => document.getElementById(id);
 const chartEl = $('chart');
 
-/* `overlay` and `overlayInk` are derived once per render in renderChart and
- * read by renderReadout, which runs on every mousemove — recomputing the
- * alignment Maps and a getComputedStyle() per pointer event was measurable. */
+/* dispatch = /api/v2/dispatch payload (all regions; sliced client-side), or
+ * null until a price/demand overlay first turns on; aligned = its per-render
+ * projection onto the chart's time axis. Price/demand overlays are OFF by
+ * default; the intensity overlay (LAB-1698) is ON by default.
+ * `aligned`, `intensityAligned` and `intensityInk` are derived once per render in
+ * renderChart and read by renderReadout, which runs on every mousemove —
+ * recomputing the alignment Maps and a getComputedStyle() per pointer event
+ * was measurable. */
 const state = {
   region: '',
   range: DEFAULT_RANGE,
@@ -53,17 +68,25 @@ const state = {
   intensity: null,
   showIntensity: true,
   ordered: [],
-  overlay: null,
-  overlayInk: '',
+  intensityAligned: null,
+  intensityInk: '',
   chart: null,
+  dispatch: null,
+  aligned: null,
+  overlays: { price: false, demand: false },
 };
 
+/** Price needs a single region — the NEM has no NEM-wide spot price. */
+const priceDrawable = () => state.overlays.price && state.region !== '';
+const overlaysWanted = () => state.overlays.price || state.overlays.demand;
+
 /* Carbon intensity (LAB-1698) for the selected region, aligned to the fuel
- * payload's buckets by TIMESTAMP rather than by index: both endpoints read the
- * same dispatch data over the same default window so the axes normally match
- * exactly, but a lookup degrades to a gap instead of silently shifting the
- * overlay if they ever don't. Returns null when the overlay has nothing to
- * draw, which is also the honest state before the first CDEII refresh runs. */
+ * payload's buckets by TIMESTAMP rather than by index: both endpoints are
+ * fetched with the same range query so the axes normally match exactly, but a
+ * lookup degrades to a gap instead of silently shifting the overlay if they
+ * ever don't (e.g. ingest lag skew at the window edge). Returns null when the
+ * overlay has nothing to draw, which is also the honest state before the
+ * first CDEII refresh runs. */
 function intensityForRegion() {
   const { intensity, payload } = state;
   if (!intensity || !payload) return null;
@@ -96,12 +119,43 @@ function renderChart() {
   const tokens = chartTokens();
   const { data, seriesOpts, bands } = buildStack(state.ordered, theme, tokens.surface, state.payload.timestamps);
 
-  // Intensity rides a SECOND y scale (different unit entirely) and is appended
+  // Overlays (LAB-1700) append AFTER the stack series so band indexes stay
+  // valid. Lines, never fills — mark kind is the primary separator from the
+  // stacked areas; the always-visible readout is the shared relief channel.
+  // Aligned once per render and stashed for renderReadout (which runs on
+  // every cursor move — no per-mousemove realignment).
+  state.aligned = state.dispatch ? alignOverlays(state.payload.timestamps, state.dispatch, state.region) : null;
+  const overlays = state.aligned;
+  const showDemand = state.overlays.demand && overlays !== null;
+  const showPrice = priceDrawable() && overlays !== null;
+  if (showDemand) {
+    data.push(overlays.demand);
+    seriesOpts.push({
+      label: 'Demand',
+      scale: 'y', // MW, same unit and scale as the generation stack
+      stroke: OVERLAY_INKS.demand[theme],
+      width: 2,
+      dash: [6, 4],
+      points: { show: false },
+    });
+  }
+  if (showPrice) {
+    data.push(overlays.price);
+    seriesOpts.push({
+      label: 'Spot price',
+      scale: 'price',
+      stroke: OVERLAY_INKS.price[theme],
+      width: 2,
+      points: { show: false },
+    });
+  }
+
+  // Intensity rides its own y scale (different unit entirely) and is appended
   // last, so it draws on top of the stack and cannot disturb the band indices
   // buildStack computed — bands only ever reference series already in place.
   const intensityValues = state.showIntensity ? intensityForRegion() : null;
-  state.overlay = intensityValues;
-  state.overlayInk = tokens.intensityInk;
+  state.intensityAligned = intensityValues;
+  state.intensityInk = tokens.intensityInk;
 
   const width = chartEl.clientWidth || 640;
   const height = Math.max(280, Math.min(420, Math.round(width * 0.45)));
@@ -154,6 +208,14 @@ function renderChart() {
     bands,
     scales: {
       y: { range: (u, min, max) => [min < 0 ? min * 1.06 : 0, max > 0 ? max * 1.04 : 1] },
+      // asinh (uPlot distr 4): linear below ~$100 where prices live day to
+      // day, logarithmic toward the caps — a $17,500 spike and a -$60 trough
+      // are both readable on one axis without clipping either.
+      price: {
+        distr: 4,
+        asinh: 100,
+        range: (u, min, max) => [min < 0 ? min * 1.1 : 0, max > 0 ? max * 1.1 : 1],
+      },
       // Anchored at zero: intensity is a magnitude against a carbon-free
       // floor, and an auto-zoomed baseline would exaggerate small swings.
       i: { range: (u, min, max) => [0, max > 0 ? max * 1.1 : 1] },
@@ -161,6 +223,23 @@ function renderChart() {
     axes: [
       { ...axis, label: 'Time (AEST)', labelSize: 22 },
       { ...axis, label: 'MW (net)', size: 64, values: (u, vals) => vals.map((v) => fmtMW.format(v)) },
+      {
+        ...axis,
+        scale: 'price',
+        side: 1,
+        size: 64,
+        show: showPrice,
+        grid: { show: false }, // the MW grid owns the plot; a second grid would lie
+        label: 'Spot price ($/MWh)',
+        stroke: OVERLAY_INKS.price[theme],
+        // Explicit pseudo-log splits matched to the asinh transform.
+        splits: (u) => {
+          const { min, max } = u.scales.price;
+          const ticks = PRICE_SPLITS.filter((t) => t >= min && t <= max);
+          return ticks.length >= 2 ? ticks : [min, max];
+        },
+        values: (u, vals) => vals.map((v) => dollars(v)),
+      },
       ...intensityAxes,
     ],
     cursor: { y: false, points: { show: false } },
@@ -220,25 +299,59 @@ function renderReadout(cursorIdx) {
 
   // Intensity gets a readout row on the same terms as every fuel: a value
   // reachable without hovering, which is what relieves the two sub-3:1 fills.
-  // It follows the overlay toggle — a line swatch pointing at a line that is
+  // It follows the intensity toggle — a line swatch pointing at a line that is
   // not drawn is worse than no row, and the headline stat carries the number
   // regardless. Both inputs were derived in renderChart; this runs per
   // mousemove.
-  if (state.overlay) {
+  if (state.intensityAligned) {
     const row = document.createElement('div');
     row.className = 'flex items-center gap-2 font-semibold';
     const line = document.createElement('span');
     line.className = 'inline-block h-0.5 w-3 shrink-0';
-    line.style.backgroundColor = state.overlayInk;
+    line.style.backgroundColor = state.intensityInk;
     const name = document.createElement('span');
     name.className = 'truncate';
     name.textContent = 'gCO₂-e/kWh';
     const val = document.createElement('span');
     val.className = 'ms-auto tabular-nums';
-    const v = state.overlay[idx];
+    const v = state.intensityAligned[idx];
     val.textContent = v == null ? '—' : fmtMW.format(v * G_PER_KWH);
     row.append(line, name, val);
     readout.append(row);
+  }
+
+  // Overlay readout rows (LAB-1700): the same relief channel the fuel bands
+  // use — every hovered price/demand value is reachable without color.
+  if (state.aligned && (state.overlays.demand || priceDrawable())) {
+    const overlays = state.aligned;
+    const theme = currentTheme();
+    const addOverlayRow = (kind, label, text) => {
+      const row = document.createElement('div');
+      row.className = 'flex items-center gap-2';
+      const swatch = document.createElement('span');
+      // Line mark ⇒ line swatch (a short rule, not the area rect).
+      swatch.className = 'inline-block h-1 w-3 shrink-0 rounded-sm';
+      swatch.style.backgroundColor = OVERLAY_INKS[kind][theme];
+      const name = document.createElement('span');
+      name.className = 'truncate text-base-content/70';
+      name.textContent = label;
+      const val = document.createElement('span');
+      val.className = 'ms-auto font-medium tabular-nums';
+      val.textContent = text;
+      row.append(swatch, name, val);
+      readout.append(row);
+    };
+    const divider = document.createElement('div');
+    divider.className = 'mt-2 border-t border-base-300 pt-2 space-y-1';
+    readout.append(divider);
+    if (priceDrawable()) {
+      const v = overlays.price[idx];
+      addOverlayRow('price', 'Spot price ($/MWh)', v == null ? '—' : dollars(v, fmtPrice));
+    }
+    if (state.overlays.demand) {
+      const v = overlays.demand[idx];
+      addOverlayRow('demand', 'Demand (MW)', v == null ? '—' : fmtMW.format(v));
+    }
   }
 }
 
@@ -309,9 +422,26 @@ function render() {
 }
 
 function showError(message) {
-  $('error-text').textContent = `Failed to load fuel mix: ${message}`;
+  $('error-text').textContent = message;
   $('error-alert').classList.remove('hidden');
 }
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// All regions in one payload (it is 5 small series) so region switches
+// re-slice client-side; refetched alongside the aggregate so the two stay on
+// the same dispatch interval. MUST carry the same range query as the
+// aggregate fetch: alignOverlays matches buckets by timestamp, and equal
+// windows are what make the two endpoints' bucket axes equal.
+const fetchDispatch = (range) => fetchJson(`/api/v2/dispatch?${rangeQuery(range)}`);
 
 // Monotonic token so a slow, stale region response can never overwrite the
 // latest selection (or clear a newer request's busy state).
@@ -331,33 +461,40 @@ async function load(region, range) {
   chartEl.classList.add('opacity-50'); // refetch keeps the previous frame
   chartEl.setAttribute('aria-busy', 'true');
   try {
+    const wantedDispatch = overlaysWanted(); // sampled now: a toggle can land mid-flight
+    // Overlay failures are isolated: an overlay that can't load must not take
+    // the fuel mix with it — each degrades to a missing overlay and logs.
     // Intensity carries no region param — the endpoint always returns every
-    // region, so one cached response serves the whole selector. Its failure is
-    // isolated: an overlay that can't load must not take the fuel mix with it.
-    const [res, intensity] = await Promise.all([
-      fetch(url),
-      fetch('/api/v2/intensity')
+    // region, so one cached response serves the whole selector. It MUST carry
+    // the same range query as the aggregate: intensityForRegion joins the two
+    // payloads strictly by timestamp, and equal windows are what make their
+    // bucket axes equal (same rule as fetchDispatch below).
+    const [payload, intensity, dispatch] = await Promise.all([
+      fetchJson(url),
+      fetch(`/api/v2/intensity?${rangeQuery(range)}`)
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .catch((err) => {
           console.error('carbon-intensity load failed:', err);
           return null;
         }),
+      wantedDispatch
+        ? fetchDispatch(range).catch((err) => { console.error('dispatch overlay refresh failed:', err); return null; })
+        : Promise.resolve(null),
     ]);
-    if (!res.ok) {
-      let detail = `HTTP ${res.status}`;
-      try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }
-      throw new Error(detail);
-    }
-    const payload = await res.json();
     if (loadId !== activeLoad) return;
     state.payload = payload;
     state.intensity = intensity;
+    // Assign only when this load's dispatch arm was real (fetched — null then
+    // means failed, degrade honestly) or overlays are still off (null clears
+    // any stale payload). An overlay toggled ON mid-flight fetches under this
+    // same loadId; its result must not be clobbered by our null placeholder.
+    if (wantedDispatch || !overlaysWanted()) state.dispatch = dispatch;
     $('error-alert').classList.add('hidden');
     render();
   } catch (err) {
     if (loadId !== activeLoad) return;
     console.error('fuel-mix load failed:', err);
-    showError(err instanceof Error ? err.message : String(err));
+    showError(`Failed to load fuel mix: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     if (loadId === activeLoad) {
       chartEl.classList.remove('opacity-50');
@@ -401,6 +538,50 @@ function renderFilters() {
     state.region, (value) => load(value, state.range));
   renderFilter('range-filter', RANGES.map(({ key, label }) => ({ value: key, label })),
     state.range, (value) => load(state.region, value));
+  // Overlay availability depends on the region (no NEM-wide spot price), and
+  // load() routes every region commit through here — one sync point.
+  updateOverlayControls();
+}
+
+// Overlay toggles (LAB-1700), OFF by default. The dispatch payload is fetched
+// lazily on the first toggle-on and kept fresh by load(); price is disabled
+// on the NEM-wide view because there is no NEM-wide spot price.
+function updateOverlayControls() {
+  const price = $('overlay-price');
+  price.disabled = state.region === '';
+  if (price.disabled && price.checked) {
+    // A disabled checkbox can't be unchecked by the user, and a checked-but-
+    // undrawable price would keep refetching dispatch on every NEM load —
+    // turn it off honestly; re-enable is one click after picking a region.
+    price.checked = false;
+    state.overlays.price = false;
+  }
+  price.closest('label').classList.toggle('opacity-50', price.disabled);
+}
+
+function initOverlays() {
+  for (const kind of ['price', 'demand']) {
+    const box = $(`overlay-${kind}`);
+    box.addEventListener('change', async () => {
+      state.overlays[kind] = box.checked;
+      if (box.checked && !state.dispatch) {
+        const loadId = activeLoad; // bail if a region switch lands mid-fetch
+        try {
+          const dispatch = await fetchDispatch(state.range);
+          if (loadId !== activeLoad) return;
+          state.dispatch = dispatch;
+        } catch (err) {
+          console.error('dispatch overlay load failed:', err);
+          showError(`Failed to load price/demand: ${err instanceof Error ? err.message : String(err)}`);
+          box.checked = false;
+          state.overlays[kind] = false;
+          return;
+        }
+      }
+      renderChart();
+      renderReadout(null);
+    });
+  }
 }
 
 // Theme toggle: explicit choice persists; OS changes apply only while the
@@ -438,7 +619,7 @@ new ResizeObserver(() => {
 
 $('error-retry').addEventListener('click', () => load(state.region, state.range));
 
-// Toggling the overlay is pure re-render — the payload is already in hand.
+// Toggling the intensity overlay is pure re-render — the payload is already in hand.
 $('intensity-toggle').addEventListener('change', (e) => {
   state.showIntensity = e.target.checked;
   if (!state.payload) return;
@@ -456,4 +637,5 @@ initTheme();
   if (REGIONS.some(([value]) => value === region)) state.region = region;
   if (RANGES.some(({ key }) => key === range)) state.range = range;
 }
+initOverlays();
 load(state.region, state.range); // renders the filters as it commits

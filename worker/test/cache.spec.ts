@@ -88,6 +88,22 @@ describe('buildCacheEntry — key canonicalisation', () => {
     expect(entryFor('?region=VIC1')!.key).not.toBe(entryFor('?region=VIC1', NOW, 'nem-api.test', '/api/v2/generators')!.key);
   });
 
+  it('dispatch keys: alias collapse, region canonicalisation, and ignored params (LAB-1700)', () => {
+    const dis = (q: string, now = NOW) => entryFor(q, now, 'nem-api.test', '/api/v2/dispatch')!;
+    expect(dis('?region=VIC1').key).toBe(dis('?state=VIC1').key);
+    expect(dis('?region=SA1,NSW1').key).toBe(dis('?region=NSW1,SA1').key);
+    // dispatch has no sort and no generator filters — params its handler
+    // ignores must not fragment the cache.
+    expect(dis('?region=VIC1&sort=value,desc&fuel=Hydro').key).toBe(dis('?region=VIC1').key);
+    // distinct from the sibling routes' keys, and from other regions.
+    expect(dis('?region=VIC1').key).not.toBe(dis('?region=NSW1').key);
+    expect(dis(`?time_start=${T0}`).key).not.toBe(entryFor(`?time_start=${T0}`)!.key);
+    // TTL policy matches values: closed absolute windows cache long, relative
+    // windows to the dispatch boundary.
+    expect(dis(`?time_start=${T0}&time_end=${T0 + 600}`).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+    expect(dis('?hours=24', NOW + 100).ttl).toBe(200);
+  });
+
   it('returns null for unknown routes and malformed params (handler owns those)', () => {
     expect(entryFor('', NOW, 'nem-api.test', '/api/v2/nope')).toBeNull();
     expect(entryFor('?limit=lots')).toBeNull();

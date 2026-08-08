@@ -189,6 +189,55 @@ straddling `time_start`/`time_end` reports the full bucket's mean rather than
 only the in-window portion. Exact `time=` lookups and resolutions
 `300`/`1800` read raw rows as before.
 
+## `GET /api/v2/dispatch`
+
+Regional 5-minute **spot price and demand** from AEMO DispatchIS
+(`DISPATCH,PRICE` RRP and `DISPATCH,REGIONSUM` TOTALDEMAND), bucketed onto
+the same shared time axis as `values`. Feeds the dashboard's price/demand
+overlays.
+
+Same time-window, `resolution`, `limit`/`offset` grammar and period-ending
+NEM-time bucket alignment as `values`. The only filter is `region` (alias
+`state`), with the usual operator inference (`,` → IN, `*` → LIKE wildcard).
+No `group_by` (region **is** the series) and no `sort` (order is always
+time-ascending).
+
+```jsonc
+{
+  "start": 1784901600,
+  "end": 1784902200,
+  "resolution": 300,
+  "truncated": false,
+  "timestamps": [1784901900, 1784902200],
+  "series": [
+    {
+      "region": "NSW1",
+      "price": [110.01, 99.73],      // mean RRP over the bucket, $/MWh
+      "price_max": [110.01, 99.73],  // max RRP in the bucket, $/MWh
+      "demand": [9655.98, 9660.12]   // mean TOTALDEMAND over the bucket, MW
+    }
+  ]
+}
+```
+
+What the data is:
+
+- `price` is the AEMO **regional reference price (RRP)** for the dispatch
+  run, `INTERVENTION=0` rows only. **Negative prices are a routine NEM
+  state** (midday solar oversupply), not an error — consumers must render
+  them.
+- `price_max` is the **maximum RRP inside the bucket**: at `resolution=300`
+  it equals `price`; at coarser resolutions it preserves spikes (a
+  $10,000/MWh interval must not vanish into an hourly mean).
+- `demand` is the **dispatch-run `TOTALDEMAND`** — AEMO's demand series used
+  by the dispatch solution, not the separately measured operational-demand
+  series (the two differ slightly).
+- Interconnector flows (`DISPATCH,INTERCONNECTORRES` METEREDMWFLOW) are
+  ingested and stored but **deliberately not exposed** yet — a flow-map view
+  is a later epic candidate; the shape here would be a new field, not a
+  breaking change.
+- `null` = no ingested sample in that bucket, same as `values`.
+
 ## `GET /api/v2/intensity`
 
 **Grid carbon intensity per NEM region, and NEM-wide** — how much CO₂-e each
