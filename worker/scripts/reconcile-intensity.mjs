@@ -127,6 +127,10 @@ async function fetchText(url) {
   return res.text();
 }
 
+async function fetchJson(url) {
+  return JSON.parse(await fetchText(url));
+}
+
 async function main() {
   if (args.includes('--self-check')) return selfCheck();
 
@@ -152,16 +156,25 @@ async function main() {
     if (day) official.set(`${day}|${r.REGIONID}`, Number(r.CO2E_INTENSITY_INDEX));
   }
 
-  const genRows = await (await fetch(`${API}/api/v2/generators`)).json();
+  const genRows = await fetchJson(`${API}/api/v2/generators`);
+  if (!Array.isArray(genRows)) throw new Error(`generators: expected an array, got ${JSON.stringify(genRows)?.slice(0, 200)}`);
   const regionOf = new Map(genRows.map((g) => [g.duid, g.state]));
+
+  // One fetch per sample day, issued in parallel; verdicts print in DAYS order.
+  const payloads = await Promise.all(
+    DAYS.map(async (day) => {
+      // Day D covers period-ENDING settlements (D 00:05 .. D+1 00:00] AEST.
+      const startUnix = Date.parse(`${day}T00:00:00+10:00`) / 1000;
+      const payload = await fetchJson(`${API}/api/v2/values?time_start=${startUnix + 300}&time_end=${startUnix + 86400}&resolution=300`);
+      if (!Array.isArray(payload?.series)) throw new Error(`${day}: values: expected a series array in the response`);
+      return payload;
+    }),
+  );
 
   let failures = 0;
   const unfactored = new Map(); // duid -> peak MW seen, for the disclosure list
-  for (const day of DAYS) {
-    // Day D covers period-ENDING settlements (D 00:05 .. D+1 00:00] AEST.
-    const startUnix = Date.parse(`${day}T00:00:00+10:00`) / 1000;
-    const url = `${API}/api/v2/values?time_start=${startUnix + 300}&time_end=${startUnix + 86400}&resolution=300`;
-    const payload = await (await fetch(url)).json();
+  for (const [di, day] of DAYS.entries()) {
+    const payload = payloads[di];
     if (payload.truncated) throw new Error(`${day}: response truncated — narrow the window`);
 
     const gens = payload.series.map((s) => ({
@@ -187,14 +200,25 @@ async function main() {
         failures++;
         continue;
       }
-      const delta = o.raw - ref;
-      const rel = ref !== 0 ? delta / ref : null;
-      const pass = ref < ABS_CUTOFF ? Math.abs(delta) <= ABS_TOLERANCE : Math.abs(rel) <= TOLERANCE;
+      // computeIntensity returns null raw/daily/coverage for a region whose
+      // generation carried no published factor — that's a verdict (FAIL,
+      // nothing to compare), not a crash.
+      const fmt = (v, digits) => (v === null ? 'n/a' : v.toFixed(digits));
+      const delta = o.raw === null ? null : o.raw - ref;
+      const rel = delta !== null && ref !== 0 ? delta / ref : null;
+      // On the relative branch ref >= ABS_CUTOFF > 0, so rel is never null there.
+      const pass =
+        delta !== null && (ref < ABS_CUTOFF ? Math.abs(delta) <= ABS_TOLERANCE : Math.abs(rel) <= TOLERANCE);
       if (!pass) failures++;
-      const dShow = ref < ABS_CUTOFF ? `${delta >= 0 ? '+' : ''}${delta.toFixed(4)} abs` : `${rel >= 0 ? '+' : ''}${(rel * 100).toFixed(1)}%`;
+      const dShow =
+        delta === null
+          ? 'n/a'
+          : ref < ABS_CUTOFF
+            ? `${delta >= 0 ? '+' : ''}${delta.toFixed(4)} abs`
+            : `${rel >= 0 ? '+' : ''}${(rel * 100).toFixed(1)}%`;
       console.log(
-        `${region.padEnd(7)} ${o.raw.toFixed(4)}    ${o.daily.toFixed(4)}      ${ref.toFixed(4)}    ${dShow.padStart(9)}  ${pass ? 'PASS' : 'FAIL'}` +
-          (region === 'NEM' ? `  (coverage ${(o.coverage * 100).toFixed(2)}%)` : ''),
+        `${region.padEnd(7)} ${fmt(o.raw, 4)}    ${fmt(o.daily, 4)}      ${ref.toFixed(4)}    ${dShow.padStart(9)}  ${pass ? 'PASS' : 'FAIL'}` +
+          (region === 'NEM' ? `  (coverage ${fmt(o.coverage === null ? null : o.coverage * 100, 2)}%)` : ''),
       );
     }
   }

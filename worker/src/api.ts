@@ -128,9 +128,9 @@ export function resolveTimeWindow(params: URLSearchParams, nowSeconds: number): 
     const n = Number(raw);
     const sub = (t: number) => (unit === 'months' ? addCalendarMonths(t, -n) : t - n * unit);
     const add = (t: number) => (unit === 'months' ? addCalendarMonths(t, n) : t + n * unit);
-    if (start === undefined && end === undefined) return { start: sub(nowSeconds) };
     if (start !== undefined) return { start, end: add(start) };
-    return { start: sub(end as number), end };
+    if (end !== undefined) return { start: sub(end), end };
+    return { start: sub(nowSeconds) };
   }
 
   const rawExact = firstParam(params, ['time']);
@@ -272,7 +272,11 @@ function pivot<K>(rows: Array<{ bucket: number; key: K; value: number }>): {
       values = new Array<number | null>(timestamps.length).fill(null);
       byKey.set(row.key, values);
     }
-    values[index.get(row.bucket) as number] = row.value;
+    // index is built from these same rows' buckets — a miss is an invariant
+    // break, and must fail loud rather than silently drop a data point.
+    const i = index.get(row.bucket);
+    if (i === undefined) throw new Error(`pivot: bucket ${row.bucket} missing from index`);
+    values[i] = row.value;
   }
   return { timestamps, byKey };
 }
@@ -564,15 +568,19 @@ async function handleIntensity(env: Env, params: URLSearchParams): Promise<Respo
   // NEM synthesized only when there is data — an empty window returns
   // `series: []`, not a hollow NEM series.
   const byRegion = new Map<string, Acc>();
-  if (results.length > 0) byRegion.set('NEM', blank());
+  const nem = blank();
+  if (results.length > 0) byRegion.set('NEM', nem);
   for (const row of results) {
-    const i = index.get(row.bucket) as number;
+    // index is built from these same rows' buckets — a miss is an invariant
+    // break; silently skipping would publish a wrong regional/NEM intensity.
+    const i = index.get(row.bucket);
+    if (i === undefined) throw new Error(`intensity: bucket ${row.bucket} missing from index`);
     let acc = byRegion.get(row.region);
     if (acc === undefined) {
       acc = blank();
       byRegion.set(row.region, acc);
     }
-    for (const a of [acc, byRegion.get('NEM') as Acc]) {
+    for (const a of [acc, nem]) {
       a.mw[i] += row.mw;
       a.mwF[i] += row.mw_f;
       a.em[i] += row.em;

@@ -169,8 +169,12 @@ export function parseSummaryCsv(text: string): { rows: CdeiiIndexRow[]; malforme
 export async function ingestEmissions(db: D1Database, factorsCsv: string, summaryCsv: string): Promise<void> {
   const factors = parseFactorsCsv(factorsCsv);
   const summary = parseSummaryCsv(summaryCsv);
-  if (factors.malformed > 0) console.warn(`emissions: skipped ${factors.malformed} malformed factor row(s)`);
-  if (summary.malformed > 0) console.warn(`emissions: skipped ${summary.malformed} malformed index row(s)`);
+  if (factors.malformed > 0) {
+    console.warn('emissions: skipped malformed factor row(s)', { op: 'emissions_refresh', file: FACTORS_FILE, malformed: factors.malformed });
+  }
+  if (summary.malformed > 0) {
+    console.warn('emissions: skipped malformed index row(s)', { op: 'emissions_refresh', file: SUMMARY_FILE, malformed: summary.malformed });
+  }
   // Zero rows means format drift or a garbage download, never a real state of
   // the NEM — throw before the batch so the previous snapshot stays intact.
   if (factors.rows.length === 0) throw new Error('emissions: no factor rows parsed');
@@ -191,7 +195,11 @@ export async function ingestEmissions(db: D1Database, factorsCsv: string, summar
   }
   const conflicting = [...byDuid.entries()].filter(([, f]) => f.size > 1).map(([d]) => d);
   if (conflicting.length > 0) {
-    console.warn(`emissions: ${conflicting.length} DUID(s) with conflicting genset factors (AVG applies): ${conflicting.sort().join(', ')}`);
+    console.warn('emissions: DUID(s) with conflicting genset factors (AVG applies)', {
+      op: 'emissions_refresh',
+      count: conflicting.length,
+      duids: conflicting.sort(),
+    });
   }
 
   const statements: D1PreparedStatement[] = [db.prepare('DELETE FROM emission_factors')];
@@ -233,13 +241,30 @@ export async function ingestEmissions(db: D1Database, factorsCsv: string, summar
   );
 }
 
+// Bounds a hung nemweb.com.au response; generous because both files are small
+// and the cron is daily — a slow success still beats an aborted refresh.
+const FETCH_TIMEOUT_MS = 30_000;
+
+/**
+ * Fetch one CDEII file, mapping timeouts, transport errors, and bad statuses
+ * to one domain failure. The body read stays inside the try — a timeout that
+ * fires mid-body (headers arrived, body stalled) must get the same mapping.
+ */
+async function fetchCdeiiFile(file: string, baseUrl: string): Promise<string> {
+  try {
+    const res = await fetch(new URL(file, baseUrl), { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } catch (err) {
+    throw new Error(`emissions: fetch failed for ${file}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** Cron entry point: fetch both CDEII files and ingest them. */
 export async function runEmissionsRefresh(env: Env, baseUrl: string = CDEII_BASE_URL): Promise<void> {
-  const [factorsRes, summaryRes] = await Promise.all([
-    fetch(new URL(FACTORS_FILE, baseUrl)),
-    fetch(new URL(SUMMARY_FILE, baseUrl)),
+  const [factorsCsv, summaryCsv] = await Promise.all([
+    fetchCdeiiFile(FACTORS_FILE, baseUrl),
+    fetchCdeiiFile(SUMMARY_FILE, baseUrl),
   ]);
-  if (!factorsRes.ok) throw new Error(`HTTP ${factorsRes.status} fetching ${FACTORS_FILE}`);
-  if (!summaryRes.ok) throw new Error(`HTTP ${summaryRes.status} fetching ${SUMMARY_FILE}`);
-  await ingestEmissions(env.DB, await factorsRes.text(), await summaryRes.text());
+  await ingestEmissions(env.DB, factorsCsv, summaryCsv);
 }
