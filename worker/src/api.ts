@@ -23,6 +23,12 @@ import { bucketExpr, nemBucket } from './rollups';
 const MAX_LIMIT = 300000;
 const DEFAULT_WINDOW_SECONDS = 86400;
 const RESOLUTIONS = [300, 1800, 3600, 86400];
+// The auto-resolution span thresholds, named so checkFineResolutionSpan's
+// caps (LAB-1721) can reuse the exact same boundaries instead of a second
+// literal table that could drift from these.
+const THREE_DAYS_SECONDS = 3 * 86400;
+const FOURTEEN_DAYS_SECONDS = 14 * 86400;
+const NINETY_DAYS_SECONDS = 90 * 86400;
 
 export const CORS_HEADERS = {
   'access-control-allow-origin': '*',
@@ -150,9 +156,9 @@ export function resolveTimeWindow(params: URLSearchParams, nowSeconds: number): 
 export function autoResolution(window: TimeWindow, nowSeconds: number): number {
   if (window.exact !== undefined && window.start === undefined && window.end === undefined) return 300;
   const span = (window.end ?? nowSeconds) - (window.start ?? 0);
-  if (span <= 3 * 86400) return 300;
-  if (span <= 14 * 86400) return 1800;
-  if (span <= 90 * 86400) return 3600;
+  if (span <= THREE_DAYS_SECONDS) return 300;
+  if (span <= FOURTEEN_DAYS_SECONDS) return 1800;
+  if (span <= NINETY_DAYS_SECONDS) return 3600;
   return 86400;
 }
 
@@ -195,14 +201,23 @@ export function servedFromRollups(window: TimeWindow, resolution: number): boole
  * any span, so there is no raw-path cost to cap.
  */
 const FINE_RESOLUTION_SPAN_CAP: Record<number, number> = {
-  300: 3 * 86400,
-  1800: 14 * 86400,
+  300: THREE_DAYS_SECONDS,
+  1800: FOURTEEN_DAYS_SECONDS,
 };
 
-/** Reject an explicit fine resolution whose window exceeds its span cap; a bare `time=` lookup is one interval, always fine. */
+/**
+ * Reject an explicit fine resolution whose window exceeds its span cap. A
+ * `time=` lookup is one interval and is always fine regardless of any
+ * start/end also present (the exact clause ANDs on top, making the query
+ * cheap no matter how wide start/end are) — same exemption `autoResolution`
+ * grants, just checked before the span math rather than only for the
+ * exact-only shape.
+ */
 function checkFineResolutionSpan(window: TimeWindow, resolution: number, nowSeconds: number): void {
   const cap = FINE_RESOLUTION_SPAN_CAP[resolution];
-  if (cap === undefined || (window.start === undefined && window.end === undefined)) return;
+  if (cap === undefined || window.exact !== undefined || (window.start === undefined && window.end === undefined)) {
+    return;
+  }
   const span = (window.end ?? nowSeconds) - (window.start ?? 0);
   if (span > cap) {
     throw new ApiError(
@@ -262,6 +277,22 @@ function generatorFilters(params: URLSearchParams, columnPrefix = ''): SqlFragme
     if (raw !== undefined) fragments.push(filterClause(column, columnPrefix + column, raw));
   }
   return fragments;
+}
+
+/**
+ * `<alias>.generator_id IN (SELECT id FROM generators WHERE ...)` for
+ * already-built generator filters, or nothing if there are none — shared by
+ * `handleValues`' raw (`sv`) and rollup (`r`) branches, which filter the same
+ * way against different fact tables.
+ */
+function generatorIdWhere(alias: string, filters: SqlFragment[]): SqlFragment[] {
+  if (filters.length === 0) return [];
+  return [
+    {
+      sql: `${alias}.generator_id IN (SELECT id FROM generators WHERE ${filters.map((f) => f.sql).join(' AND ')})`,
+      binds: filters.flatMap((f) => f.binds),
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +371,19 @@ function timeClauses(window: TimeWindow, column: string): SqlFragment[] {
   return clauses;
 }
 
+/**
+ * Rollup-table bucket-range clause (`r.bucket` against the window, in bucket
+ * labels via nemBucket): shared by every rollup-served handler (values,
+ * aggregate, intensity) so the bucket-clipping semantics cannot drift between
+ * them the way three independent copies eventually would.
+ */
+function rollupBucketWhere(window: TimeWindow, resolution: number): SqlFragment[] {
+  const where: SqlFragment[] = [];
+  if (window.start !== undefined) where.push({ sql: 'r.bucket >= ?', binds: [nemBucket(window.start, resolution)] });
+  if (window.end !== undefined) where.push({ sql: 'r.bucket <= ?', binds: [nemBucket(window.end, resolution)] });
+  return where;
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 
@@ -362,15 +406,7 @@ async function handleValues(env: Env, params: URLSearchParams): Promise<Response
     // reconcile against, unlike the aggregate endpoint's summed groups —
     // so this is the raw path's AVG(value), not an approximation of it.
     const table = resolution === 86400 ? 'scada_daily' : 'scada_hourly';
-    const where: SqlFragment[] = [];
-    if (window.start !== undefined) where.push({ sql: 'r.bucket >= ?', binds: [nemBucket(window.start, resolution)] });
-    if (window.end !== undefined) where.push({ sql: 'r.bucket <= ?', binds: [nemBucket(window.end, resolution)] });
-    if (filters.length > 0) {
-      where.push({
-        sql: `r.generator_id IN (SELECT id FROM generators WHERE ${filters.map((f) => f.sql).join(' AND ')})`,
-        binds: filters.flatMap((f) => f.binds),
-      });
-    }
+    const where = [...rollupBucketWhere(window, resolution), ...generatorIdWhere('r', filters)];
     sql =
       'SELECT r.bucket AS bucket, r.generator_id AS gid, ROUND(r.sum_value / r.n_samples, 4) AS value ' +
       `FROM ${table} r ` +
@@ -378,13 +414,7 @@ async function handleValues(env: Env, params: URLSearchParams): Promise<Response
       `${resolveOrder(params)} LIMIT ? OFFSET ?`;
     binds = [...where.flatMap((c) => c.binds), limit, offset];
   } else {
-    const where = timeClauses(window, 'sv.scrape_time');
-    if (filters.length > 0) {
-      where.push({
-        sql: `sv.generator_id IN (SELECT id FROM generators WHERE ${filters.map((f) => f.sql).join(' AND ')})`,
-        binds: filters.flatMap((f) => f.binds),
-      });
-    }
+    const where = [...timeClauses(window, 'sv.scrape_time'), ...generatorIdWhere('sv', filters)];
 
     sql =
       `SELECT ${bucketExpr('sv.scrape_time', resolution)} AS bucket, ` +
@@ -470,9 +500,7 @@ async function handleAggregate(env: Env, params: URLSearchParams): Promise<Respo
     // being skipped. A bucket straddling the window edge reports the FULL
     // bucket's mean. Exact `time=` lookups stay raw — they read one interval.
     const table = resolution === 86400 ? 'scada_daily' : 'scada_hourly';
-    const where: SqlFragment[] = [];
-    if (window.start !== undefined) where.push({ sql: 'r.bucket >= ?', binds: [nemBucket(window.start, resolution)] });
-    if (window.end !== undefined) where.push({ sql: 'r.bucket <= ?', binds: [nemBucket(window.end, resolution)] });
+    const where = rollupBucketWhere(window, resolution);
     where.push(...generatorFilters(params, 'g.'));
     // Interval counts are stored per hourly bucket; a daily bucket is exactly
     // 24 NEM-aligned hours (no DST), so daily denominators sum the hourly ones.
@@ -712,9 +740,7 @@ async function handleIntensity(env: Env, params: URLSearchParams): Promise<Respo
   let binds: (string | number)[];
 
   if (fromRollups) {
-    const where: SqlFragment[] = [];
-    if (window.start !== undefined) where.push({ sql: 'r.bucket >= ?', binds: [nemBucket(window.start, resolution)] });
-    if (window.end !== undefined) where.push({ sql: 'r.bucket <= ?', binds: [nemBucket(window.end, resolution)] });
+    const where = rollupBucketWhere(window, resolution);
     // Rollup rows are ALREADY per (bucket, generator), so there is nothing to
     // group — project and clamp. MAX(x, 0) is SQLite's two-argument SCALAR
     // max, not the aggregate.

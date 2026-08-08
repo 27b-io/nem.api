@@ -299,6 +299,12 @@ describe('/api/v2/values', () => {
 
     // 3600/86400 are rollup-served at any span (LAB-1721) — no cap applies.
     expect((await get('/api/v2/values?months=13&resolution=86400')).status).toBe(200);
+
+    // An exact `time=` lookup is one interval and is never capped, even with
+    // a wide (ignored) time_start/time_end also present alongside it.
+    expect(
+      (await get(`/api/v2/values?time=${T0}&time_start=${T0 - 30 * 86400}&resolution=300`)).status,
+    ).toBe(200);
   });
 });
 
