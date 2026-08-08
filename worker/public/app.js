@@ -57,7 +57,7 @@ const chartEl = $('chart');
  * null until a price/demand overlay first turns on; aligned = its per-render
  * projection onto the chart's time axis. Price/demand overlays are OFF by
  * default; the intensity overlay (LAB-1698) is ON by default.
- * `aligned`, `overlay` and `overlayInk` are derived once per render in
+ * `aligned`, `intensityAligned` and `intensityInk` are derived once per render in
  * renderChart and read by renderReadout, which runs on every mousemove —
  * recomputing the alignment Maps and a getComputedStyle() per pointer event
  * was measurable. */
@@ -68,8 +68,8 @@ const state = {
   intensity: null,
   showIntensity: true,
   ordered: [],
-  overlay: null,
-  overlayInk: '',
+  intensityAligned: null,
+  intensityInk: '',
   chart: null,
   dispatch: null,
   aligned: null,
@@ -153,8 +153,8 @@ function renderChart() {
   // last, so it draws on top of the stack and cannot disturb the band indices
   // buildStack computed — bands only ever reference series already in place.
   const intensityValues = state.showIntensity ? intensityForRegion() : null;
-  state.overlay = intensityValues;
-  state.overlayInk = tokens.intensityInk;
+  state.intensityAligned = intensityValues;
+  state.intensityInk = tokens.intensityInk;
 
   const width = chartEl.clientWidth || 640;
   const height = Math.max(280, Math.min(420, Math.round(width * 0.45)));
@@ -298,22 +298,22 @@ function renderReadout(cursorIdx) {
 
   // Intensity gets a readout row on the same terms as every fuel: a value
   // reachable without hovering, which is what relieves the two sub-3:1 fills.
-  // It follows the overlay toggle — a line swatch pointing at a line that is
+  // It follows the intensity toggle — a line swatch pointing at a line that is
   // not drawn is worse than no row, and the headline stat carries the number
   // regardless. Both inputs were derived in renderChart; this runs per
   // mousemove.
-  if (state.overlay) {
+  if (state.intensityAligned) {
     const row = document.createElement('div');
     row.className = 'flex items-center gap-2 font-semibold';
     const line = document.createElement('span');
     line.className = 'inline-block h-0.5 w-3 shrink-0';
-    line.style.backgroundColor = state.overlayInk;
+    line.style.backgroundColor = state.intensityInk;
     const name = document.createElement('span');
     name.className = 'truncate';
     name.textContent = 'gCO₂-e/kWh';
     const val = document.createElement('span');
     val.className = 'ms-auto tabular-nums';
-    const v = state.overlay[idx];
+    const v = state.intensityAligned[idx];
     val.textContent = v == null ? '—' : fmtMW.format(v * G_PER_KWH);
     row.append(line, name, val);
     readout.append(row);
@@ -615,7 +615,7 @@ new ResizeObserver(() => {
 
 $('error-retry').addEventListener('click', () => load(state.region, state.range));
 
-// Toggling the overlay is pure re-render — the payload is already in hand.
+// Toggling the intensity overlay is pure re-render — the payload is already in hand.
 $('intensity-toggle').addEventListener('change', (e) => {
   state.showIntensity = e.target.checked;
   if (!state.payload) return;

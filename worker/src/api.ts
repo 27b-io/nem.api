@@ -1,6 +1,6 @@
 // HTTP query API (LAB-418): /api/v2/values, /api/v2/values/aggregate,
-// /api/v2/generators, /api/v2/intensity — a greenfields v2 contract over the
-// D1 store. PUBLIC
+// /api/v2/dispatch, /api/v2/generators, /api/v2/intensity — a greenfields v2
+// contract over the D1 store. PUBLIC
 // (ray, 2026-07-24: public until abuse is detected), so the contract in
 // worker/API.md (owned jointly with the LAB-419 frontend) is the product.
 // The legacy restify API (api/v1.1) is reference-only, not a contract.

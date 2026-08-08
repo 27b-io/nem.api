@@ -224,10 +224,16 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
       // Rollup-served responses (LAB-1696 aggregate, LAB-1698 intensity)
       // return the FULL bucket straddling `time_end`, so the response keeps
       // changing until that bucket completes — the closed test must clear the
-      // bucket end, not just `time_end`. `/values` is raw at every resolution
-      // and clips to the window, so it is excluded by route, but the ROUTING
-      // condition itself comes from api.ts so it cannot drift here.
-      if (upper !== undefined && route !== '/api/v2/values' && servedFromRollups(window, resolution)) {
+      // bucket end, not just `time_end`. `/values` and `/dispatch` read raw
+      // rows at every resolution and clip to the window, so they are excluded
+      // by route (allowlist, so a future raw route cannot inherit this by
+      // default); the rollup ROUTING condition itself comes from api.ts so it
+      // cannot drift here.
+      if (
+        upper !== undefined &&
+        (route === '/api/v2/values/aggregate' || route === '/api/v2/intensity') &&
+        servedFromRollups(window, resolution)
+      ) {
         upper = nemBucket(upper, resolution);
       }
       // Closed = every sample the response can ever reflect has been
