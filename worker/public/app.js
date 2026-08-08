@@ -25,6 +25,7 @@
  * is 2.44:1 on the dark surface. */
 import { alignOverlays, OVERLAY_INKS } from './overlays.js';
 import { buildStack, orderSeries } from './stacking.js';
+import { bucketLabel, DEFAULT_RANGE, RANGES, rangeQuery } from './ranges.js';
 
 const REGIONS = [
   ['', 'NEM'], ['QLD1', 'QLD'], ['NSW1', 'NSW'],
@@ -52,7 +53,7 @@ const chartEl = $('chart');
 // null until an overlay first turns on; aligned = its per-render projection
 // onto the chart's time axis. Overlays are OFF by default.
 const state = {
-  region: '', payload: null, ordered: [], chart: null,
+  region: '', range: DEFAULT_RANGE, payload: null, ordered: [], chart: null,
   dispatch: null, aligned: null, overlays: { price: false, demand: false },
 };
 
@@ -181,8 +182,10 @@ function renderReadout(cursorIdx) {
   }
   const idx = cursorIdx ?? payload.timestamps.length - 1;
   const ts = payload.timestamps[idx];
+  // Bucket width from the resolution the API says it served, not the one we
+  // asked for — a daily bucket must not claim a 5-minute interval.
   $('readout-time').textContent =
-    `Interval ending ${fmtTime.format(ts * 1e3)} AEST · ${fmtDate.format(ts * 1e3)}`;
+    `${bucketLabel(payload.resolution)} ending ${fmtTime.format(ts * 1e3)} AEST · ${fmtDate.format(ts * 1e3)}`;
 
   let total = 0;
   let sawValue = false;
@@ -294,16 +297,25 @@ async function fetchJson(url) {
 
 // All regions in one payload (it is 5 small series) so region switches
 // re-slice client-side; refetched alongside the aggregate so the two stay on
-// the same dispatch interval.
-const fetchDispatch = () => fetchJson('/api/v2/dispatch');
+// the same dispatch interval. MUST carry the same range query as the
+// aggregate fetch: alignOverlays matches buckets by timestamp, and equal
+// windows are what make the two endpoints' bucket axes equal.
+const fetchDispatch = (range) => fetchJson(`/api/v2/dispatch?${rangeQuery(range)}`);
 
 // Monotonic token so a slow, stale region response can never overwrite the
 // latest selection (or clear a newer request's busy state).
 let activeLoad = 0;
 
-async function load(region) {
+async function load(region, range) {
   const loadId = ++activeLoad;
-  const url = '/api/v2/values/aggregate?group_by=fuel'
+  // Selection commits immediately (state, buttons, URL) so a click during an
+  // in-flight fetch composes with THIS selection, and error-Retry retries
+  // what the user actually asked for — only the payload waits on success.
+  state.region = region;
+  state.range = range;
+  syncUrl(region, range);
+  renderFilters();
+  const url = `/api/v2/values/aggregate?group_by=fuel&${rangeQuery(range)}`
     + (region ? `&region=${encodeURIComponent(region)}` : '');
   chartEl.classList.add('opacity-50'); // refetch keeps the previous frame
   chartEl.setAttribute('aria-busy', 'true');
@@ -313,13 +325,12 @@ async function load(region) {
       // A dispatch failure must never take the fuel-mix chart down with it:
       // degrade to a missing overlay (readout shows "—") and log it.
       overlaysWanted()
-        ? fetchDispatch().catch((err) => { console.error('dispatch overlay refresh failed:', err); return null; })
+        ? fetchDispatch(range).catch((err) => { console.error('dispatch overlay refresh failed:', err); return null; })
         : Promise.resolve(null),
     ]);
     if (loadId !== activeLoad) return;
     state.payload = payload;
     state.dispatch = dispatch; // null when no overlay is on — refetched fresh at first toggle
-    state.region = region;
     $('error-alert').classList.add('hidden');
     render();
   } catch (err) {
@@ -334,23 +345,44 @@ async function load(region) {
   }
 }
 
-function renderRegionFilter() {
-  const nav = $('region-filter');
+// Selection lives in the URL (shareable links); defaults stay unset so the
+// boot URL is unchanged. ?theme= and anything else present are preserved.
+function syncUrl(region, range) {
+  const qs = new URLSearchParams(location.search);
+  if (region) qs.set('region', region); else qs.delete('region');
+  if (range !== DEFAULT_RANGE) qs.set('range', range); else qs.delete('range');
+  const search = qs.toString();
+  history.replaceState(null, '', search ? `?${search}` : location.pathname);
+}
+
+/* Region and range are the same control: a daisyUI join group where exactly
+ * one button is active, and picking one refetches with BOTH selections
+ * applied (they compose on the same endpoint). */
+function renderFilter(id, options, selected, pick) {
+  const nav = $(id);
   nav.textContent = '';
-  for (const [value, label] of REGIONS) {
+  for (const { value, label } of options) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn join-item btn-sm' + (value === state.region ? ' btn-active' : '');
-    btn.setAttribute('aria-pressed', String(value === state.region));
+    btn.className = 'btn join-item btn-sm' + (value === selected ? ' btn-active' : '');
+    btn.setAttribute('aria-pressed', String(value === selected));
     btn.textContent = label;
-    btn.addEventListener('click', async () => {
-      if (value === state.region) return;
-      await load(value);
-      renderRegionFilter();
-      updateOverlayControls();
+    btn.addEventListener('click', () => {
+      if (value === selected) return;
+      pick(value); // load() re-renders the filters as it commits the selection
     });
     nav.append(btn);
   }
+}
+
+function renderFilters() {
+  renderFilter('region-filter', REGIONS.map(([value, label]) => ({ value, label })),
+    state.region, (value) => load(value, state.range));
+  renderFilter('range-filter', RANGES.map(({ key, label }) => ({ value: key, label })),
+    state.range, (value) => load(state.region, value));
+  // Overlay availability depends on the region (no NEM-wide spot price), and
+  // load() routes every region commit through here — one sync point.
+  updateOverlayControls();
 }
 
 // Overlay toggles (LAB-1700), OFF by default. The dispatch payload is fetched
@@ -377,7 +409,7 @@ function initOverlays() {
       if (box.checked && !state.dispatch) {
         const loadId = activeLoad; // bail if a region switch lands mid-fetch
         try {
-          const dispatch = await fetchDispatch();
+          const dispatch = await fetchDispatch(state.range);
           if (loadId !== activeLoad) return;
           state.dispatch = dispatch;
         } catch (err) {
@@ -428,9 +460,17 @@ new ResizeObserver(() => {
   }
 }).observe(chartEl);
 
-$('error-retry').addEventListener('click', () => load(state.region));
+$('error-retry').addEventListener('click', () => load(state.region, state.range));
 
 initTheme();
-renderRegionFilter();
+// Restore selection from the URL (shareable links); unknown values fall back
+// to the defaults, so the bare URL still boots identical to before.
+{
+  const qs = new URLSearchParams(location.search);
+  const region = qs.get('region');
+  const range = qs.get('range');
+  if (REGIONS.some(([value]) => value === region)) state.region = region;
+  if (RANGES.some(({ key }) => key === range)) state.range = range;
+}
 initOverlays();
-load('');
+load(state.region, state.range); // renders the filters as it commits
