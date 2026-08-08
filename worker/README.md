@@ -394,10 +394,20 @@ then smoke-check `/health`. It needs two repo Actions secrets:
   before they reach the Worker, so the smoke step sends
   `X-Smoke-Bypass: <token>` and a WAF custom rule on the 27b.io zone skips the
   filtering **only** when host is `nem.27b.io`, path is `/health`, and the
-  header equals this secret. Rotate by generating a new random value and
-  updating the WAF rule and this secret together. If the smoke step starts
-  403ing again, check zone Security → Events for the blocking service — a
-  block by Bot Fight Mode cannot be skipped by custom rules.
+  header equals this secret. Scope the rule's **Skip** action narrowly: first
+  identify the blocking service in zone Security → Events (the `cf-ray` from a
+  failed run log looks it up directly), then tick only that product in the
+  rule's "WAF components to skip" — do not select "All remaining custom rules"
+  or products that aren't doing the blocking. Place it above any custom rule
+  that could match this request — a Skip does not suppress custom rules listed
+  after it unless "All remaining custom rules" is ticked (which it must not
+  be). All unrelated WAF, rate-limiting, and custom rules stay enabled,
+  including for `/health`.
+  Rotate by generating a new random value and updating the WAF rule and this
+  secret together. If the smoke step starts 403ing again, check zone
+  Security → Events for the blocking service — a block by (classic) Bot Fight
+  Mode cannot be skipped by custom rules; only Super Bot Fight Mode /
+  Bot Management rules can.
 
 Manual deploy still works:
 

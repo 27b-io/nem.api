@@ -48,17 +48,29 @@ jobs:
       # on the 27b.io zone SKIPs that filtering only for /health requests carrying
       # this secret header, so the check still exercises the real public route.
       # SMOKE_BYPASS_TOKEN must match the value in the WAF rule — see
-      # worker/README.md "Deploy". --dump-header prints RESPONSE headers only
-      # (cf-ray / cf-mitigated, for Security-Events triage on failure); never use
-      # `curl -v` here, it would echo the request header — and the secret — into
-      # the public run log.
+      # worker/README.md "Deploy". Only the status line / cf-ray / cf-mitigated
+      # are echoed from the header dump — a challenge response can carry
+      # Set-Cookie, which must not land in the public run log. Never use
+      # `curl -v` here either; it would echo the request header — and the
+      # secret — into the log. The gate requires curl exit 0 AND exactly
+      # HTTP 200: --fail alone accepts 3xx, and %{http_code} alone reads 200
+      # even when the transfer dies after the status line.
       - name: Smoke-check /health
         env:
           SMOKE_BYPASS_TOKEN: ${{ secrets.SMOKE_BYPASS_TOKEN }}
         run: |
           : "${SMOKE_BYPASS_TOKEN:?repo secret SMOKE_BYPASS_TOKEN not set — see worker/README.md Deploy}"
           sleep 15
-          curl --fail --silent --show-error --retry 5 --retry-delay 10 --retry-all-errors \
-            --dump-header - \
+          hdrs="$(mktemp)"
+          rc=0
+          http_code="$(curl --fail --silent --show-error \
+            --retry 5 --retry-delay 10 --retry-all-errors \
+            --connect-timeout 10 --max-time 30 --retry-max-time 180 \
+            --dump-header "$hdrs" --output /dev/null --write-out '%{http_code}' \
             --header "X-Smoke-Bypass: ${SMOKE_BYPASS_TOKEN}" \
-            https://nem.27b.io/health
+            https://nem.27b.io/health)" || rc=$?
+          grep --ignore-case --extended-regexp '^(HTTP/|cf-ray:|cf-mitigated:)' "$hdrs" || true
+          if [ "$rc" -ne 0 ] || [ "$http_code" != "200" ]; then
+            echo "smoke check failed: curl exit ${rc}, HTTP ${http_code:-000} (need exit 0 + HTTP 200; 000 = no HTTP response, see curl stderr above)"
+            exit 1
+          fi
