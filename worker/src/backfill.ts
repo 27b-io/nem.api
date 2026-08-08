@@ -162,9 +162,7 @@ export async function ingestDaily(env: Env, filename: string, duids: Map<string,
   for (let i = 0; i < mapped.length; i += UPSERT_ROWS_PER_BATCH) {
     await upsertValues(env.DB, mapped.slice(i, i + UPSERT_ROWS_PER_BATCH));
   }
-  // Rollups before the ledger (LAB-1696): a failed refresh leaves the day
-  // unledgered, so the retry rebuilds values + rollups together.
-  await refreshTouchedRollups(env.DB, mapped);
+  await refreshTouchedRollups(env.DB, mapped); // pre-ledger, per the refreshRollups contract
 
   // Ledger write last, same contract as the CURRENT ingest: any failure above
   // leaves the day unrecorded and the next run retries it end to end.

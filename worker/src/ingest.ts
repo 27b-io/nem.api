@@ -90,10 +90,9 @@ async function alreadyIngested(db: D1Database, filenames: string[]): Promise<Set
 
 /**
  * Refresh the rollup buckets (LAB-1696) covering a batch of upserted rows.
- * Must run BEFORE the ledger write: a refresh failure then leaves the file
- * unrecorded, and the retry rebuilds values + rollups together — rollups can
- * never go permanently stale behind a ledgered file. Shared by the CURRENT
- * ingest and the ARCHIVE backfill (src/backfill.ts).
+ * Shared by the CURRENT ingest and the ARCHIVE backfill (src/backfill.ts);
+ * both call it after their value upsert and before their ledger write — the
+ * ordering contract lives on refreshRollups (src/rollups.ts).
  */
 export async function refreshTouchedRollups(db: D1Database, rows: MappedRow[]): Promise<void> {
   if (rows.length === 0) return;
@@ -156,7 +155,7 @@ async function ingestFile(
   }
 
   await upsertValues(env.DB, mapped);
-  await refreshTouchedRollups(env.DB, mapped);
+  await refreshTouchedRollups(env.DB, mapped); // pre-ledger, per the refreshRollups contract
 
   // Archive the raw zip under a deterministic key; a no-op when already there.
   const key = `current/${filename}`;
