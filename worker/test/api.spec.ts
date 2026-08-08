@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { upsertDispatchRows, upsertValues } from '../src/ingest';
+import { refreshTouchedRollups, upsertDispatchRows, upsertValues } from '../src/ingest';
 import worker from '../src/index';
 
 // Fixed dispatch-interval base, aligned to an hour boundary (divisible by 300,
@@ -32,7 +32,13 @@ let er01: number;
 beforeEach(async () => {
   // vitest-pool-workers 0.18 (cloudflareTest plugin) has no per-test storage
   // isolation — tests in a file share one D1, so clear values explicitly.
-  await env.DB.batch([env.DB.prepare('DELETE FROM scada_values'), env.DB.prepare('DELETE FROM dispatch_region')]);
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM scada_values'),
+    env.DB.prepare('DELETE FROM dispatch_region'),
+    env.DB.prepare('DELETE FROM scada_hourly'),
+    env.DB.prepare('DELETE FROM scada_daily'),
+    env.DB.prepare('DELETE FROM scada_intervals'),
+  ]);
   host = `t-${crypto.randomUUID()}.test`;
   baps = await gidOf('BAPS');
   bw01 = await gidOf('BW01');
@@ -90,11 +96,15 @@ describe('/api/v2/values', () => {
 
   it('buckets server-side at a coarse resolution (hourly mean, period-ending label)', async () => {
     // 12 five-minute samples with period-ending times inside the hour ending
-    // T0+3600: mean(1..12) = 6.5, labelled by the bucket END.
-    await upsertValues(
-      env.DB,
-      Array.from({ length: 12 }, (_, i) => ({ scrapeTime: T0 + (i + 1) * 300, generatorId: baps, value: i + 1 })),
-    );
+    // T0+3600: mean(1..12) = 6.5, labelled by the bucket END. resolution=3600
+    // is rollup-served (LAB-1721), so the rollups must be refreshed too.
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      scrapeTime: T0 + (i + 1) * 300,
+      generatorId: baps,
+      value: i + 1,
+    }));
+    await upsertValues(env.DB, rows);
+    await refreshTouchedRollups(env.DB, rows);
 
     const res = await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 3600}&resolution=3600`);
     const body = await res.json<ValuesBody>();
@@ -117,12 +127,15 @@ describe('/api/v2/values', () => {
   });
 
   it('aligns daily buckets to NEM time (AEST midnight, not UTC)', async () => {
-    // 2026-07-25 00:00 AEST == 2026-07-24 14:00 UTC.
+    // 2026-07-25 00:00 AEST == 2026-07-24 14:00 UTC. resolution=86400 is
+    // rollup-served (LAB-1721), so the rollups must be refreshed too.
     const dayEnd = Date.UTC(2026, 6, 24, 14, 0, 0) / 1000;
-    await upsertValues(env.DB, [
+    const rows = [
       { scrapeTime: dayEnd - 3600, generatorId: baps, value: 5 }, // 23:00 AEST -> day ending dayEnd
       { scrapeTime: dayEnd + 300, generatorId: baps, value: 7 }, // 00:05 AEST -> next day
-    ]);
+    ];
+    await upsertValues(env.DB, rows);
+    await refreshTouchedRollups(env.DB, rows);
 
     const body = await (
       await get(`/api/v2/values?time_start=${dayEnd - 3600}&time_end=${dayEnd + 300}&resolution=86400`)
@@ -271,6 +284,28 @@ describe('/api/v2/values', () => {
     ).json<ValuesBody>();
     expect(explicit.start).toBe(aestMidnight);
   });
+
+  it('rejects an explicit fine resolution whose window exceeds its span cap (LAB-1721)', async () => {
+    const tooWide300 = await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 4 * 86400}&resolution=300`);
+    expect(tooWide300.status).toBe(400);
+    expect((await tooWide300.json<{ error: string }>()).error).toMatch(/window too wide for resolution=300/);
+
+    // Right at the cap is still fine.
+    expect((await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 3 * 86400}&resolution=300`)).status).toBe(200);
+
+    expect((await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 15 * 86400}&resolution=1800`)).status).toBe(
+      400,
+    );
+
+    // 3600/86400 are rollup-served at any span (LAB-1721) — no cap applies.
+    expect((await get('/api/v2/values?months=13&resolution=86400')).status).toBe(200);
+
+    // An exact `time=` lookup is one interval and is never capped, even with
+    // a wide (ignored) time_start/time_end also present alongside it.
+    expect(
+      (await get(`/api/v2/values?time=${T0}&time_start=${T0 - 30 * 86400}&resolution=300`)).status,
+    ).toBe(200);
+  });
 });
 
 describe('/api/v2/values/aggregate', () => {
@@ -331,6 +366,17 @@ describe('/api/v2/values/aggregate', () => {
   it('rejects a missing or unknown group_by', async () => {
     expect((await get('/api/v2/values/aggregate')).status).toBe(400);
     expect((await get('/api/v2/values/aggregate?group_by=duid')).status).toBe(400);
+  });
+
+  it('rejects an explicit fine resolution whose window exceeds its span cap (LAB-1721)', async () => {
+    const tooWide = await get(
+      `/api/v2/values/aggregate?group_by=fuel&time_start=${T0}&time_end=${T0 + 4 * 86400}&resolution=300`,
+    );
+    expect(tooWide.status).toBe(400);
+    expect((await tooWide.json<{ error: string }>()).error).toMatch(/window too wide for resolution=300/);
+
+    // 3600/86400 already route to rollups at any span (LAB-1696) — no cap applies.
+    expect((await get('/api/v2/values/aggregate?group_by=fuel&months=13&resolution=86400')).status).toBe(200);
   });
 });
 

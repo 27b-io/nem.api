@@ -97,6 +97,16 @@ endpoint; the headline fuel-mix view is `values/aggregate` below.
 If `truncated` is true, narrow the filters, coarsen `resolution`, or page
 with `offset`.
 
+Resolutions `3600`/`86400` are served from the same per-generator rollup
+tables as `values/aggregate` (LAB-1696/LAB-1721), so long windows — up to the
+full ~13-month retention — stay interactive instead of failing. `values[i]` at
+these two resolutions is the exact mean of *that generator's own* reported
+samples in the bucket (`sum_value / n_samples`) — no cross-generator interval
+count to reconcile, so this is the raw path's `AVG(value)` exactly, not an
+approximation of it. As with `values/aggregate`, a bucket straddling
+`time_start`/`time_end` reports the full bucket's mean. Exact `time=` lookups
+and resolutions `300`/`1800` read raw rows as before.
+
 ### Query parameters
 
 **Time window:**
@@ -121,6 +131,17 @@ all → the last 24 hours.**
 **Bucketing**: `resolution` — one of `300`, `1800`, `3600`, `86400` seconds.
 Unset → auto by window span: ≤3 days → 300, ≤14 days → 1800, ≤90 days → 3600,
 else 86400.
+
+An **explicit** `resolution=300` or `resolution=1800` is rejected with a 400
+("window too wide for resolution=…") if the window's span exceeds that
+resolution's cap — 3 days for `300`, 14 days for `1800` (the same boundary the
+auto-pick above already uses; `300`/`1800` never route to rollups, so a wider
+window would GROUP BY raw rows and risk the SQLITE_NOMEM failure LAB-1696
+exists to avoid). `3600`/`86400` have no such cap on `values`/`values/aggregate`
+— both are served from rollups at any span. An exact `time=` lookup is always
+one interval and is never capped. This applies to `values` and
+`values/aggregate`; `/api/v2/intensity` has its own, stricter floor (see
+below).
 
 **Generator filters** (also on `generators` and `values/aggregate`). One
 canonical name per field, plus at most one alias; when both are given the
