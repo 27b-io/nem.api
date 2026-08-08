@@ -89,6 +89,22 @@ export interface Feed<Batch> {
 // ---------------------------------------------------------------------------
 // Shared discovery helpers
 
+// NEMWEB occasionally stalls mid-response instead of failing fast; without a
+// deadline a hung fetch eats the rest of the invocation's wall-clock budget.
+// 120s bounds a hard hang while leaving headroom for the largest object we
+// pull (~6MB DispatchIS daily zip) over a degraded link — a too-tight
+// deadline would deterministically abort the same fetch every retry.
+const NEMWEB_FETCH_TIMEOUT_MS = 120_000;
+
+/**
+ * All NEMWEB calls go through here: fetch with a hard deadline. The signal
+ * stays attached to the response body, so a stall during arrayBuffer() reads
+ * aborts too, not just a stall before headers.
+ */
+export function fetchNemweb(url: URL | string): Promise<Response> {
+  return fetch(url, { signal: AbortSignal.timeout(NEMWEB_FETCH_TIMEOUT_MS) });
+}
+
 /**
  * Pull PUBLIC_*.zip filenames out of a NEMWEB autoindex page. The IIS-style
  * listing uses uppercase tags/attributes (<A HREF="...">) — HTMLRewriter
@@ -325,7 +341,7 @@ async function ingestFile<B>(
   filename: string,
   context: string,
 ): Promise<number> {
-  const res = await fetch(new URL(filename, listingUrl));
+  const res = await fetchNemweb(new URL(filename, listingUrl));
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${filename}`);
   const zipBytes = new Uint8Array(await res.arrayBuffer());
 
@@ -354,7 +370,7 @@ async function ingestFile<B>(
 export async function runIngest<B>(env: Env, feed: Feed<B>): Promise<void> {
   const tag = `ingest:${feed.label}`;
   const listingUrl = feed.currentListingUrl;
-  const listing = await fetch(listingUrl);
+  const listing = await fetchNemweb(listingUrl);
   if (!listing.ok) throw new Error(`HTTP ${listing.status} fetching listing ${listingUrl}`);
   const filenames = await extractZipFilenames(listing);
 

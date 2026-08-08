@@ -24,7 +24,7 @@
 
 import { unzipSync } from 'fflate';
 import type { Feed, FeedProcessor } from './ingest';
-import { extractZipFilenames } from './ingest';
+import { extractZipFilenames, fetchNemweb } from './ingest';
 import type { Env } from './index';
 
 // Must match the second cron expression in wrangler.toml exactly — the
@@ -95,7 +95,7 @@ export async function ingestDaily<B>(
     zipBytes = new Uint8Array(await cached.arrayBuffer());
     source = 'r2';
   } else {
-    const res = await fetch(new URL(filename, feed.archiveListingUrl));
+    const res = await fetchNemweb(new URL(filename, feed.archiveListingUrl));
     if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${filename}`);
     zipBytes = new Uint8Array(await res.arrayBuffer());
     source = 'nemweb';
@@ -171,7 +171,7 @@ export interface BackfillRun {
 
 export async function runBackfill<B>(env: Env, feed: Feed<B>): Promise<BackfillRun> {
   const tag = `backfill:${feed.label}`;
-  const listing = await fetch(feed.archiveListingUrl);
+  const listing = await fetchNemweb(feed.archiveListingUrl);
   if (!listing.ok) throw new Error(`HTTP ${listing.status} fetching listing ${feed.archiveListingUrl}`);
   const dailies = (await extractZipFilenames(listing)).filter((n) => feed.dailyNameRe.test(n));
 
