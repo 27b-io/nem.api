@@ -77,10 +77,18 @@ export function parseRooftopPvCsv(text: string): { rows: RooftopRow[]; malformed
       malformed++;
       continue;
     }
+    // QI absent/empty is a documented state (null); a PRESENT but non-numeric
+    // QI is format drift and must be as loud as any other malformed field —
+    // quality is stored-not-exposed, so a silent fold to null would never be
+    // noticed by anyone.
     const rawQi = field('QI');
     const qi = rawQi === '' ? null : Number(rawQi);
+    if (qi !== null && !Number.isFinite(qi)) {
+      malformed++;
+      continue;
+    }
 
-    rows.push({ intervalTime, region, power, quality: qi !== null && Number.isFinite(qi) ? qi : null });
+    rows.push({ intervalTime, region, power, quality: qi });
   }
 
   return { rows, malformed };

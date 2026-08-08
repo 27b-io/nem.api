@@ -75,8 +75,12 @@ describe('parseRooftopPvCsv', () => {
     expect(parseRooftopPvCsv(csv)).toEqual({ rows: [], malformed: 1 });
   });
 
-  it('an empty or absent QI stores null, not NaN or zero', () => {
-    const csv = [HEADER, 'D,ROOFTOP,ACTUAL,2,"2026/08/09 07:30:00",NSW1,300,,MEASUREMENT,"x"'].join('\n');
-    expect(parseRooftopPvCsv(csv).rows[0].quality).toBeNull();
+  it('an empty or absent QI stores null; a PRESENT non-numeric QI is malformed (drift stays loud)', () => {
+    const empty = [HEADER, 'D,ROOFTOP,ACTUAL,2,"2026/08/09 07:30:00",NSW1,300,,MEASUREMENT,"x"'].join('\n');
+    expect(parseRooftopPvCsv(empty).rows[0].quality).toBeNull();
+    // quality is stored-not-exposed — a silent fold to null would never be
+    // noticed, so garbage must count like any other malformed field.
+    const garbage = [HEADER, 'D,ROOFTOP,ACTUAL,2,"2026/08/09 07:30:00",NSW1,300,oops,MEASUREMENT,"x"'].join('\n');
+    expect(parseRooftopPvCsv(garbage)).toEqual({ rows: [], malformed: 1 });
   });
 });

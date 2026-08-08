@@ -33,7 +33,7 @@ import type { Env } from './index';
 import { nemBucket } from './rollups';
 import {
   CORS_HEADERS,
-  DISPATCH_FILTERS,
+  REGION_FILTERS,
   firstParam,
   GENERATOR_FILTERS,
   handleApi,
@@ -55,7 +55,7 @@ export const INGEST_GRACE_SECONDS = 60;
 // window ending at T can therefore keep changing until ~T+35min — closing it
 // on the dispatch boundary + 60s would cache a response missing its final
 // half-hour for a whole day. 45 minutes = publication lag + poll + margin.
-export const ROOFTOP_INTERVAL_SECONDS = 1800;
+const ROOFTOP_INTERVAL_SECONDS = 1800;
 export const ROOFTOP_PUBLICATION_GRACE_SECONDS = 2700;
 // Fully-past windows are immutable per the dispatch model, but the ARCHIVE
 // backfill (LAB-420) heals >2-day-old gaps — an infinite TTL would pin a gap
@@ -221,7 +221,7 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
         // dispatch/rooftop have no sort and only the region filter — a
         // `sort=` or `fuel=` the handler ignores must not fragment the cache.
         const { limit, offset } = resolveLimit(params);
-        parts.push(`lim=${limit}`, `off=${offset}`, ...filterParts(params, DISPATCH_FILTERS));
+        parts.push(`lim=${limit}`, `off=${offset}`, ...filterParts(params, REGION_FILTERS));
       } else if (route !== '/api/v2/intensity') {
         const { limit, offset } = resolveLimit(params);
         parts.push(`lim=${limit}`, `off=${offset}`, `ord=${resolveOrder(params)}`, ...filterParts(params, GENERATOR_FILTERS));

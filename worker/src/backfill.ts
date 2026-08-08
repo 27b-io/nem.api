@@ -9,14 +9,14 @@
 // two never share an invocation budget) and drains oldest-first at
 // MAX_BUNDLES_PER_RUN per run — a full archive (~375 days) completes in roughly
 // a day of wall time. Once drained, each run costs a listing fetch plus one
-// ledger query, and picks up new daily zips as ARCHIVE publishes them — so
-// gaps longer than CURRENT's ~2-day window heal automatically, forever.
+// ledger query, and picks up new bundles as ARCHIVE publishes them — so
+// gaps longer than CURRENT's retention window heal automatically, forever.
 //
-// Resumability is per day: a daily zip's filename is recorded in the `scrape`
+// Resumability is per bundle: a bundle's filename is recorded in the `scrape`
 // ledger only after its values are upserted and the raw zip archived, so a
-// failed day stays unrecorded and retries next run. Value upserts are
-// idempotent, so re-processing a day that CURRENT ingest already covered (the
-// ARCHIVE/CURRENT boundary overlaps by design) is a harmless no-op.
+// failed bundle stays unrecorded and retries next run. Value upserts are
+// idempotent, so re-processing a span that CURRENT ingest already covered
+// (the ARCHIVE/CURRENT boundary overlaps by design) is a harmless no-op.
 //
 // Measured (LAB-420, live 2026-01-15 archive): SCADA daily zip ~1.2MB
 // compressed, ~11.5MB of CSV decompressed one inner file at a time, ~60k
@@ -43,7 +43,7 @@ const MAX_BUNDLES_PER_RUN = 4;
 // mean NEMWEB is rate-limiting us — stop extending the block, resume next run.
 const MAX_CONSECUTIVE_FAILURES = 3;
 
-export interface DayStats {
+export interface BundleStats {
   innerFiles: number;
   skippedInner: number;
   values: number;
@@ -51,8 +51,8 @@ export interface DayStats {
   source: 'r2' | 'nemweb';
 }
 
-/** Daily-archive filenames already recorded in the ledger, within the listing's range. */
-async function ledgeredDailies(db: D1Database, filenames: string[], glob: string): Promise<Set<string>> {
+/** Archive-bundle filenames already recorded in the ledger, within the listing's range. */
+async function ledgeredBundles(db: D1Database, filenames: string[], glob: string): Promise<Set<string>> {
   if (filenames.length === 0) return new Set();
   const sorted = [...filenames].sort();
   // Range on the PK bounds the scan; the GLOB drops the five-minute filenames
@@ -65,7 +65,8 @@ async function ledgeredDailies(db: D1Database, filenames: string[], glob: string
 }
 
 /**
- * Ingest one daily archive zip. Reads the raw zip from R2 when a prior
+ * Ingest one archive bundle zip (daily for the dispatch feeds, weekly for
+ * rooftop). Reads the raw zip from R2 when a prior
  * partial run already archived it (retries then skip the NEMWEB re-download —
  * the ARCHIVE files are immutable, and the object is only ever written after
  * a successful full parse, so R2 content is always valid); otherwise fetches
@@ -76,17 +77,17 @@ async function ledgeredDailies(db: D1Database, filenames: string[], glob: string
  * otherwise retry forever. Whole-day failures (fetch, corrupt outer zip, zero
  * parsed rows) do throw, leaving the day unledgered for retry.
  */
-export async function ingestDaily<B>(
+export async function ingestBundle<B>(
   env: Env,
   feed: Feed<B>,
   processor: FeedProcessor<B>,
   filename: string,
-): Promise<DayStats> {
+): Promise<BundleStats> {
   const tag = `backfill:${feed.label}`;
   const key = `archive/${filename}`;
 
   let zipBytes: Uint8Array;
-  let source: DayStats['source'];
+  let source: BundleStats['source'];
   const cached = await env.ARCHIVE.get(key);
   if (cached !== null) {
     zipBytes = new Uint8Array(await cached.arrayBuffer());
@@ -102,7 +103,7 @@ export async function ingestDaily<B>(
   const innerNames = Object.keys(inner)
     .filter((n) => /\.zip$/i.test(n))
     .sort();
-  if (innerNames.length === 0) throw new Error(`${filename}: daily zip contains no inner zips`);
+  if (innerNames.length === 0) throw new Error(`${filename}: bundle contains no inner zips`);
 
   let parsed = 0;
   let skippedInner = 0;
@@ -121,7 +122,7 @@ export async function ingestDaily<B>(
       for (const t of result.intervals) intervals.add(t);
     } catch (err) {
       // The archive is immutable — this inner file will never heal on retry.
-      // Log the gap and move on; the raw daily zip lands in R2 regardless.
+      // Log the gap and move on; the raw bundle zip lands in R2 regardless.
       skippedInner++;
       console.warn(`${tag}: ${filename}/${name}: skipped inner file:`, err instanceof Error ? err.message : err);
     }
@@ -162,7 +163,7 @@ export interface BackfillRun {
   ok: number;
   failed: number;
   values: number;
-  /** Pending daily archives left for future runs after this one. */
+  /** Pending archive bundles left for future runs after this one. */
   remaining: number;
 }
 
@@ -172,7 +173,7 @@ export async function runBackfill<B>(env: Env, feed: Feed<B>): Promise<BackfillR
   if (!listing.ok) throw new Error(`HTTP ${listing.status} fetching listing ${feed.archiveListingUrl}`);
   const bundles = (await extractZipFilenames(listing)).filter((n) => feed.archiveNameRe.test(n));
 
-  const seen = await ledgeredDailies(env.DB, bundles, feed.archiveNameGlob);
+  const seen = await ledgeredBundles(env.DB, bundles, feed.archiveNameGlob);
   const pending = bundles.filter((f) => !seen.has(f)); // sorted → oldest first
   if (pending.length === 0) {
     console.log(`${tag}: idle (${bundles.length} archive bundles listed, all ingested)`);
@@ -188,7 +189,7 @@ export async function runBackfill<B>(env: Env, feed: Feed<B>): Promise<BackfillR
 
   for (const filename of batch) {
     try {
-      const stats = await ingestDaily(env, feed, processor, filename);
+      const stats = await ingestBundle(env, feed, processor, filename);
       ok++;
       values += stats.values;
       consecutiveFailures = 0;

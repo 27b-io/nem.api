@@ -1,6 +1,6 @@
 // HTTP query API (LAB-418): /api/v2/values, /api/v2/values/aggregate,
-// /api/v2/dispatch, /api/v2/generators, /api/v2/intensity — a greenfields v2
-// contract over the D1 store. PUBLIC
+// /api/v2/dispatch, /api/v2/rooftop, /api/v2/generators, /api/v2/intensity —
+// a greenfields v2 contract over the D1 store. PUBLIC
 // (ray, 2026-07-24: public until abuse is detected), so the contract in
 // worker/API.md (owned jointly with the LAB-419 frontend) is the product.
 // The legacy restify API (api/v1.1) is reference-only, not a contract.
@@ -205,9 +205,10 @@ export const GENERATOR_FILTERS: Array<{ column: string; aliases: string[] }> = [
   { column: 'duid', aliases: ['duid'] },
 ];
 
-// The only filter /api/v2/dispatch accepts (dispatch_region has no generator
-// dimensions). Exported for src/cache.ts, same single-sourcing as above.
-export const DISPATCH_FILTERS: Array<{ column: string; aliases: string[] }> = [
+// The only filter /api/v2/dispatch and /api/v2/rooftop accept (their tables
+// have no generator dimensions — region IS the series). Exported for
+// src/cache.ts, same single-sourcing as above.
+export const REGION_FILTERS: Array<{ column: string; aliases: string[] }> = [
   { column: 'region', aliases: ['region', 'state'] },
 ];
 
@@ -492,7 +493,7 @@ async function handleDispatch(env: Env, params: URLSearchParams): Promise<Respon
   const { limit, offset } = resolveLimit(params);
 
   const where = timeClauses(window, 'settlement_time');
-  for (const { column, aliases } of DISPATCH_FILTERS) {
+  for (const { column, aliases } of REGION_FILTERS) {
     const raw = firstParam(params, aliases);
     if (raw !== undefined) where.push(filterClause(column, column, raw));
   }
@@ -566,7 +567,7 @@ async function handleRooftop(env: Env, params: URLSearchParams): Promise<Respons
   const { limit, offset } = resolveLimit(params);
 
   const where = timeClauses(window, 'interval_time');
-  for (const { column, aliases } of DISPATCH_FILTERS) {
+  for (const { column, aliases } of REGION_FILTERS) {
     const raw = firstParam(params, aliases);
     if (raw !== undefined) where.push(filterClause(column, column, raw));
   }

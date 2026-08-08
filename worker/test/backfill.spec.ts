@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:test';
 import { strToU8, zipSync } from 'fflate';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ingestDaily, runBackfill } from '../src/backfill';
+import { ingestBundle, runBackfill } from '../src/backfill';
 import { DISPATCH_IS_FEED, ROOFTOP_FEED, SCADA_FEED } from '../src/ingest';
 
 // Tests run in the same isolate as the code under test, so stubbing global
@@ -349,7 +349,7 @@ describe('runBackfill — rooftop PV feed (LAB-1701)', () => {
   });
 });
 
-describe('ingestDaily', () => {
+describe('ingestBundle', () => {
   it('tolerates a corrupt inner file: counts it, ingests the rest, still ledgers the day', async () => {
     const zip = zipSync({
       'PUBLIC_DISPATCHSCADA_202601010005_0000000000000001.zip': zipSync({
@@ -359,7 +359,7 @@ describe('ingestDaily', () => {
     });
     await env.ARCHIVE.put('archive/PUBLIC_DISPATCHSCADA_20260101.zip', zip);
 
-    const stats = await ingestDaily(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip');
+    const stats = await ingestBundle(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip');
     expect(stats).toMatchObject({ innerFiles: 2, skippedInner: 1, values: 2, intervals: 1, source: 'r2' });
     expect(await valueCount()).toBe(2);
     expect(await ledgerFilenames()).toEqual(['PUBLIC_DISPATCHSCADA_20260101.zip']);
@@ -373,7 +373,7 @@ describe('ingestDaily', () => {
     interceptDaily('20260101', zip);
 
     await expect(
-      ingestDaily(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip'),
+      ingestBundle(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip'),
     ).rejects.toThrow(/no usable rows/);
     expect(await ledgerFilenames()).toEqual([]);
     expect(await env.ARCHIVE.head('archive/PUBLIC_DISPATCHSCADA_20260101.zip')).toBeNull();

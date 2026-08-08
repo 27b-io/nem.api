@@ -96,6 +96,17 @@ describe('alignRooftop', () => {
     expect(alignRooftop([H2, H2 + 3600], 3600, hourly, 'NSW1')).toEqual([4050, null]);
   });
 
+  it('daily buckets end at AEST midnight — the +10h offset in the covering step is load-bearing', () => {
+    // Daily bucket ending 2026-08-09 00:00 AEST = 2026-08-08 14:00 UTC:
+    // NOT divisible by 86400, so dropping the NEM offset would compute a
+    // different covering bucket and this join would come back null.
+    const dayEnd = Date.UTC(2026, 7, 8, 14) / 1000;
+    expect((dayEnd + 36000) % 86400).toBe(0); // fixture sanity: AEST-midnight-ending
+    expect(dayEnd % 86400).not.toBe(0);
+    const daily = { timestamps: [dayEnd], series: [{ region: 'NSW1', power: [980] }] };
+    expect(alignRooftop([dayEnd], 86400, daily, 'NSW1')).toEqual([980]);
+  });
+
   it('handles a missing or empty payload and an unknown region without throwing', () => {
     expect(alignRooftop([H1], 300, null, 'NSW1')).toEqual([null]);
     expect(alignRooftop([H1], 300, { timestamps: [], series: [] }, 'NSW1')).toEqual([null]);
