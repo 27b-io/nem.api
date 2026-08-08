@@ -184,6 +184,34 @@ export function servedFromRollups(window: TimeWindow, resolution: number): boole
   return window.exact === undefined && resolution >= 3600;
 }
 
+/**
+ * LAB-1721: resolutions 300/1800 never route to rollups (only 3600/86400 do,
+ * on both `values` and `aggregate`), so a wide enough window still GROUP-BYs
+ * raw scada_values and hits the same SQLITE_NOMEM shape LAB-1696 fixed for
+ * 3600/86400. Cap each fine resolution's window span at its own
+ * auto-resolution threshold — the boundary /api/v2/intensity (LAB-1698)
+ * already enforces via its resolution floor — rather than inventing a second
+ * number. 3600/86400 are exempt: both endpoints serve them from rollups at
+ * any span, so there is no raw-path cost to cap.
+ */
+const FINE_RESOLUTION_SPAN_CAP: Record<number, number> = {
+  300: 3 * 86400,
+  1800: 14 * 86400,
+};
+
+/** Reject an explicit fine resolution whose window exceeds its span cap; a bare `time=` lookup is one interval, always fine. */
+function checkFineResolutionSpan(window: TimeWindow, resolution: number, nowSeconds: number): void {
+  const cap = FINE_RESOLUTION_SPAN_CAP[resolution];
+  if (cap === undefined || (window.start === undefined && window.end === undefined)) return;
+  const span = (window.end ?? nowSeconds) - (window.start ?? 0);
+  if (span > cap) {
+    throw new ApiError(
+      400,
+      `window too wide for resolution=${resolution}; maximum span for this resolution is ${cap / 86400} days`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Generator filter grammar (port of queryParser.parseGeneratorParameters)
 
@@ -319,24 +347,53 @@ async function handleValues(env: Env, params: URLSearchParams): Promise<Response
   const nowSeconds = Math.floor(Date.now() / 1000);
   const window = resolveTimeWindow(params, nowSeconds);
   const resolution = resolveResolution(params, window, nowSeconds);
+  checkFineResolutionSpan(window, resolution, nowSeconds);
   const { limit, offset } = resolveLimit(params);
   const filters = generatorFilters(params);
 
-  const where = timeClauses(window, 'sv.scrape_time');
-  if (filters.length > 0) {
-    where.push({
-      sql: `sv.generator_id IN (SELECT id FROM generators WHERE ${filters.map((f) => f.sql).join(' AND ')})`,
-      binds: filters.flatMap((f) => f.binds),
-    });
-  }
+  let sql: string;
+  let binds: (string | number)[];
+  if (servedFromRollups(window, resolution)) {
+    // Rollup path (LAB-1696/LAB-1721): resolution 3600/86400 reads the
+    // per-generator rollup tables instead of GROUP-BYing raw 5-minute rows
+    // over the full window (the SQLITE_NOMEM shape — see handleAggregate).
+    // sum_value / n_samples is the exact mean of THIS generator's own
+    // reported samples in the bucket: no cross-generator interval count to
+    // reconcile against, unlike the aggregate endpoint's summed groups —
+    // so this is the raw path's AVG(value), not an approximation of it.
+    const table = resolution === 86400 ? 'scada_daily' : 'scada_hourly';
+    const where: SqlFragment[] = [];
+    if (window.start !== undefined) where.push({ sql: 'r.bucket >= ?', binds: [nemBucket(window.start, resolution)] });
+    if (window.end !== undefined) where.push({ sql: 'r.bucket <= ?', binds: [nemBucket(window.end, resolution)] });
+    if (filters.length > 0) {
+      where.push({
+        sql: `r.generator_id IN (SELECT id FROM generators WHERE ${filters.map((f) => f.sql).join(' AND ')})`,
+        binds: filters.flatMap((f) => f.binds),
+      });
+    }
+    sql =
+      'SELECT r.bucket AS bucket, r.generator_id AS gid, ROUND(r.sum_value / r.n_samples, 4) AS value ' +
+      `FROM ${table} r ` +
+      `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
+      `${resolveOrder(params)} LIMIT ? OFFSET ?`;
+    binds = [...where.flatMap((c) => c.binds), limit, offset];
+  } else {
+    const where = timeClauses(window, 'sv.scrape_time');
+    if (filters.length > 0) {
+      where.push({
+        sql: `sv.generator_id IN (SELECT id FROM generators WHERE ${filters.map((f) => f.sql).join(' AND ')})`,
+        binds: filters.flatMap((f) => f.binds),
+      });
+    }
 
-  const sql =
-    `SELECT ${bucketExpr('sv.scrape_time', resolution)} AS bucket, ` +
-    'sv.generator_id AS gid, ROUND(AVG(sv.value), 4) AS value ' +
-    'FROM scada_values sv ' +
-    `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
-    `GROUP BY bucket, gid ${resolveOrder(params)} LIMIT ? OFFSET ?`;
-  const binds = [...where.flatMap((c) => c.binds), limit, offset];
+    sql =
+      `SELECT ${bucketExpr('sv.scrape_time', resolution)} AS bucket, ` +
+      'sv.generator_id AS gid, ROUND(AVG(sv.value), 4) AS value ' +
+      'FROM scada_values sv ' +
+      `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
+      `GROUP BY bucket, gid ${resolveOrder(params)} LIMIT ? OFFSET ?`;
+    binds = [...where.flatMap((c) => c.binds), limit, offset];
+  }
 
   const { results } = await env.DB.prepare(sql)
     .bind(...binds)
@@ -395,6 +452,7 @@ async function handleAggregate(env: Env, params: URLSearchParams): Promise<Respo
   const nowSeconds = Math.floor(Date.now() / 1000);
   const window = resolveTimeWindow(params, nowSeconds);
   const resolution = resolveResolution(params, window, nowSeconds);
+  checkFineResolutionSpan(window, resolution, nowSeconds);
   const { limit, offset } = resolveLimit(params);
 
   let sql: string;

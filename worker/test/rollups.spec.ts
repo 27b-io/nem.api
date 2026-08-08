@@ -101,6 +101,56 @@ function expectTriplesClose(actual: Triple[], expected: Triple[]): void {
   actual.forEach((t, i) => expect(t.value).toBeCloseTo(expected[i].value, 6));
 }
 
+interface ValuesBody {
+  timestamps: number[];
+  series: Array<{ id: number; values: (number | null)[] }>;
+}
+
+interface GenTriple {
+  bucket: number;
+  gid: number;
+  value: number;
+}
+
+/** Flatten a `values` body back to sorted (bucket, generator, value) triples — the per-generator twin of `flatten`. */
+function flattenValues(body: ValuesBody): GenTriple[] {
+  const out: GenTriple[] = [];
+  for (const s of body.series) {
+    s.values.forEach((v, i) => {
+      if (v !== null) out.push({ bucket: body.timestamps[i], gid: s.id, value: v });
+    });
+  }
+  return out.sort((a, b) => a.bucket - b.bucket || a.gid - b.gid);
+}
+
+/** The PRE-rollup `values` SQL (the raw-row path): per-generator AVG, run directly against D1. */
+async function rawValues(
+  start: number,
+  end: number,
+  resolution: number,
+  filterSql = '',
+  filterBinds: (string | number)[] = [],
+): Promise<GenTriple[]> {
+  const off = 36000;
+  const sql =
+    `SELECT ((sv.scrape_time + ${off + resolution - 1}) / ${resolution}) * ${resolution} - ${off} AS bucket, ` +
+    'sv.generator_id AS gid, ROUND(AVG(sv.value), 4) AS value ' +
+    'FROM scada_values sv JOIN generators g ON g.id = sv.generator_id ' +
+    `WHERE sv.scrape_time >= ? AND sv.scrape_time <= ? ${filterSql} ` +
+    'GROUP BY bucket, gid ORDER BY bucket ASC, gid ASC';
+  const { results } = await env.DB.prepare(sql)
+    .bind(start, end, ...filterBinds)
+    .all<GenTriple>();
+  return results;
+}
+
+function expectGenTriplesClose(actual: GenTriple[], expected: GenTriple[]): void {
+  expect(actual.map((t) => ({ bucket: t.bucket, gid: t.gid }))).toEqual(
+    expected.map((t) => ({ bucket: t.bucket, gid: t.gid })),
+  );
+  actual.forEach((t, i) => expect(t.value).toBeCloseTo(expected[i].value, 6));
+}
+
 beforeEach(async () => {
   await env.DB.batch([
     env.DB.prepare('DELETE FROM scada_values'),
@@ -161,6 +211,36 @@ describe('rollup path equivalence with the raw-row path', () => {
     expectTriplesClose(
       flatten(body),
       await rawAggregate('state', T0, T0 + 2 * DAY, DAY, 'AND g.fuel_type = ?', ['Fossil']),
+    );
+  });
+
+  it('matches raw hourly per-generator means bucket-for-bucket (values, resolution=3600)', async () => {
+    await seed(twoDays());
+    const res = await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 2 * DAY}&resolution=3600`);
+    expect(res.status).toBe(200);
+    const body = await res.json<ValuesBody>();
+    expect(body.timestamps).toHaveLength(48);
+    expectGenTriplesClose(flattenValues(body), await rawValues(T0, T0 + 2 * DAY, HOUR));
+  });
+
+  it('matches raw daily per-generator means (values, resolution=86400)', async () => {
+    await seed(twoDays());
+    const body = await (
+      await get(`/api/v2/values?time_start=${T0}&time_end=${T0 + 2 * DAY}&resolution=86400`)
+    ).json<ValuesBody>();
+    expect(body.timestamps).toEqual([T0 + DAY, T0 + 2 * DAY]);
+    expectGenTriplesClose(flattenValues(body), await rawValues(T0, T0 + 2 * DAY, DAY));
+  });
+
+  it('matches raw daily per-generator means with a fuel filter (values)', async () => {
+    await seed(twoDays());
+    const body = await (
+      await get(`/api/v2/values?fuel=Fossil&time_start=${T0}&time_end=${T0 + 2 * DAY}&resolution=86400`)
+    ).json<ValuesBody>();
+    expect(body.series.map((s) => s.id).sort((a, b) => a - b)).toEqual([bw01, er01].sort((a, b) => a - b));
+    expectGenTriplesClose(
+      flattenValues(body),
+      await rawValues(T0, T0 + 2 * DAY, DAY, 'AND g.fuel_type = ?', ['Fossil']),
     );
   });
 });
@@ -267,5 +347,24 @@ describe('query routing', () => {
     host = `t-${crypto.randomUUID()}.test`;
     const rolled = await (await get(q(`time_start=${T0}&time_end=${T0 + HOUR}&resolution=3600`))).json<AggregateBody>();
     expect(rolled.series).toEqual([{ key: 'Hydro', values: [10] }]);
+  });
+
+  it('routes /values the same way (LAB-1721): 300/1800/exact raw, 3600/86400 rollups', async () => {
+    await upsertValues(env.DB, [{ scrapeTime: T0 + 300, generatorId: baps, value: 10 }]);
+    const q = (extra: string) => `/api/v2/values?${extra}`;
+
+    const fine = await (await get(q(`time_start=${T0}&time_end=${T0 + 300}&resolution=1800`))).json<ValuesBody>();
+    expect(fine.series).toMatchObject([{ id: baps, values: [10] }]);
+
+    const exact = await (await get(q(`time=${T0 + 300}&resolution=3600`))).json<ValuesBody>();
+    expect(exact.series).toMatchObject([{ id: baps, values: [10] }]);
+
+    const hourly = await (await get(q(`time_start=${T0}&time_end=${T0 + HOUR}&resolution=3600`))).json<ValuesBody>();
+    expect(hourly.series).toEqual([]); // rollups not yet refreshed
+
+    await refreshRollups(env.DB, T0 + 300, T0 + 300);
+    host = `t-${crypto.randomUUID()}.test`;
+    const rolled = await (await get(q(`time_start=${T0}&time_end=${T0 + HOUR}&resolution=3600`))).json<ValuesBody>();
+    expect(rolled.series).toMatchObject([{ id: baps, values: [10] }]);
   });
 });

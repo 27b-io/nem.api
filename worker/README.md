@@ -261,16 +261,19 @@ npx wrangler d1 execute nem-api-db --remote --command \
   "DELETE FROM scrape WHERE filename GLOB 'PUBLIC_DISPATCHSCADA_????????.zip'"
 ```
 
-## Aggregate rollups (LAB-1696)
+## Aggregate rollups (LAB-1696, LAB-1721)
 
-`/api/v2/values/aggregate` at resolution `3600`/`86400` is served from
-pre-aggregated per-generator tables (`scada_hourly`, `scada_daily`, plus the
-per-bucket interval counts in `scada_intervals` — `migrations/0004_rollups.sql`)
-instead of GROUP-BYing raw 5-minute rows: beyond ~90 days the raw grouping
-exhausts D1's SQLite memory budget (`D1_ERROR: out of memory: SQLITE_NOMEM`,
-confirmed via `wrangler tail` 2026-08-08), and the full 13-month window scans
-~50M raw rows vs ~200k daily rollup rows. Resolutions `300`/`1800` and exact
-`time=` lookups keep the raw path.
+`/api/v2/values` and `/api/v2/values/aggregate` at resolution `3600`/`86400`
+are served from pre-aggregated per-generator tables (`scada_hourly`,
+`scada_daily`, plus the per-bucket interval counts in `scada_intervals` —
+`migrations/0004_rollups.sql`) instead of GROUP-BYing raw 5-minute rows:
+beyond ~90 days the raw grouping exhausts D1's SQLite memory budget
+(`D1_ERROR: out of memory: SQLITE_NOMEM`, confirmed via `wrangler tail`
+2026-08-08), and the full 13-month window scans ~50M raw rows vs ~200k daily
+rollup rows. Resolutions `300`/`1800` and exact `time=` lookups keep the raw
+path — and are capped to a maximum window span (3 days / 14 days) on both
+endpoints, since a wide enough window there hits the same SQLITE_NOMEM shape
+(LAB-1721; see `worker/API.md`).
 
 Maintenance is automatic: both writers (5-minute CURRENT ingest and ARCHIVE
 backfill) call `refreshRollups` (`src/rollups.ts`) after upserting values and
