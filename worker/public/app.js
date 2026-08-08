@@ -23,6 +23,7 @@
  * Known WARNs, both relieved by the always-visible readout values (the
  * mandated relief channel): solar #eda100 is 2.17:1 on white; fossil #8f4d0f
  * is 2.44:1 on the dark surface. */
+import { alignOverlays, OVERLAY_INKS } from './overlays.js';
 import { buildStack, orderSeries } from './stacking.js';
 
 const REGIONS = [
@@ -32,13 +33,28 @@ const REGIONS = [
 
 const TZ = 'Australia/Brisbane'; // NEM market time: AEST, UTC+10, never DST (not Sydney)
 const fmtMW = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
+const fmtPrice = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 2 });
 const fmtTime = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
 const fmtDate = new Intl.DateTimeFormat('en-AU', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short' });
+
+/** "-$60" reads better than "$-60" on an axis; `fmt` picks the precision. */
+const dollars = (v, fmt = fmtMW) => (v < 0 ? `-$${fmt.format(-v)}` : `$${fmt.format(v)}`);
+
+// Price-axis tick candidates: symmetric pseudo-log steps to match the asinh
+// scale (uPlot distr 4) the price overlay renders on — a $17,500 spike and a
+// -$60 trough both stay readable. Filtered to the visible range at render.
+const PRICE_SPLITS = [-30000, -10000, -3000, -1000, -300, -100, -30, 0, 30, 100, 300, 1000, 3000, 10000, 30000];
 
 const $ = (id) => document.getElementById(id);
 const chartEl = $('chart');
 
-const state = { region: '', payload: null, ordered: [], chart: null };
+// dispatch = /api/v2/dispatch payload (all regions; sliced client-side), or
+// null until an overlay first turns on. Overlays are OFF by default.
+const state = { region: '', payload: null, ordered: [], chart: null, dispatch: null, overlays: { price: false, demand: false } };
+
+/** Price needs a single region — the NEM has no NEM-wide spot price. */
+const priceDrawable = () => state.overlays.price && state.region !== '';
+const overlaysWanted = () => state.overlays.price || state.overlays.demand;
 
 function currentTheme() {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -60,6 +76,35 @@ function renderChart() {
   const theme = currentTheme();
   const tokens = chartTokens();
   const { data, seriesOpts, bands } = buildStack(state.ordered, theme, tokens.surface, state.payload.timestamps);
+
+  // Overlays (LAB-1700) append AFTER the stack series so band indexes stay
+  // valid. Lines, never fills — mark kind is the primary separator from the
+  // stacked areas; the always-visible readout is the shared relief channel.
+  const overlays = state.dispatch ? alignOverlays(state.payload.timestamps, state.dispatch, state.region) : null;
+  const showDemand = state.overlays.demand && overlays !== null;
+  const showPrice = priceDrawable() && overlays !== null;
+  if (showDemand) {
+    data.push(overlays.demand);
+    seriesOpts.push({
+      label: 'Demand',
+      scale: 'y', // MW, same unit and scale as the generation stack
+      stroke: OVERLAY_INKS.demand[theme],
+      width: 2,
+      dash: [6, 4],
+      points: { show: false },
+    });
+  }
+  if (showPrice) {
+    data.push(overlays.price);
+    seriesOpts.push({
+      label: 'Spot price',
+      scale: 'price',
+      stroke: OVERLAY_INKS.price[theme],
+      width: 2,
+      points: { show: false },
+    });
+  }
+
   const width = chartEl.clientWidth || 640;
   const height = Math.max(280, Math.min(420, Math.round(width * 0.45)));
   const axis = {
@@ -78,10 +123,35 @@ function renderChart() {
     bands,
     scales: {
       y: { range: (u, min, max) => [min < 0 ? min * 1.06 : 0, max > 0 ? max * 1.04 : 1] },
+      // asinh (uPlot distr 4): linear below ~$100 where prices live day to
+      // day, logarithmic toward the caps — a $17,500 spike and a -$60 trough
+      // are both readable on one axis without clipping either.
+      price: {
+        distr: 4,
+        asinh: 100,
+        range: (u, min, max) => [min < 0 ? min * 1.1 : 0, max > 0 ? max * 1.1 : 1],
+      },
     },
     axes: [
       { ...axis, label: 'Time (AEST)', labelSize: 22 },
       { ...axis, label: 'MW (net)', size: 64, values: (u, vals) => vals.map((v) => fmtMW.format(v)) },
+      {
+        ...axis,
+        scale: 'price',
+        side: 1,
+        size: 64,
+        show: showPrice,
+        grid: { show: false }, // the MW grid owns the plot; a second grid would lie
+        label: 'Spot price ($/MWh)',
+        stroke: OVERLAY_INKS.price[theme],
+        // Explicit pseudo-log splits matched to the asinh transform.
+        splits: (u) => {
+          const { min, max } = u.scales.price;
+          const ticks = PRICE_SPLITS.filter((t) => t >= min && t <= max);
+          return ticks.length >= 2 ? ticks : [min, max];
+        },
+        values: (u, vals) => vals.map((v) => dollars(v)),
+      },
     ],
     cursor: { y: false, points: { show: false } },
     legend: { show: false },
@@ -135,6 +205,40 @@ function renderReadout(cursorIdx) {
   totalVal.textContent = sawValue ? fmtMW.format(total) : '—';
   totalRow.append(totalName, totalVal);
   readout.append(totalRow);
+
+  // Overlay readout rows (LAB-1700): the same relief channel the fuel bands
+  // use — every hovered price/demand value is reachable without color.
+  if (state.dispatch && (state.overlays.demand || priceDrawable())) {
+    const overlays = alignOverlays(payload.timestamps, state.dispatch, state.region);
+    const theme = currentTheme();
+    const addOverlayRow = (kind, label, text) => {
+      const row = document.createElement('div');
+      row.className = 'flex items-center gap-2';
+      const swatch = document.createElement('span');
+      // Line mark ⇒ line swatch (a short rule, not the area rect).
+      swatch.className = 'inline-block h-1 w-3 shrink-0 rounded-sm';
+      swatch.style.backgroundColor = OVERLAY_INKS[kind][theme];
+      const name = document.createElement('span');
+      name.className = 'truncate text-base-content/70';
+      name.textContent = label;
+      const val = document.createElement('span');
+      val.className = 'ms-auto font-medium tabular-nums';
+      val.textContent = text;
+      row.append(swatch, name, val);
+      readout.append(row);
+    };
+    const divider = document.createElement('div');
+    divider.className = 'mt-2 border-t border-base-300 pt-2 space-y-1';
+    readout.append(divider);
+    if (priceDrawable()) {
+      const v = overlays.price[idx];
+      addOverlayRow('price', 'Spot price ($/MWh)', v == null ? '—' : dollars(v, fmtPrice));
+    }
+    if (state.overlays.demand) {
+      const v = overlays.demand[idx];
+      addOverlayRow('demand', 'Demand (MW)', v == null ? '—' : fmtMW.format(v));
+    }
+  }
 }
 
 function renderHero() {
@@ -167,9 +271,24 @@ function render() {
 }
 
 function showError(message) {
-  $('error-text').textContent = `Failed to load fuel mix: ${message}`;
+  $('error-text').textContent = message;
   $('error-alert').classList.remove('hidden');
 }
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// All regions in one payload (it is 5 small series) so region switches
+// re-slice client-side; refetched alongside the aggregate so the two stay on
+// the same dispatch interval.
+const fetchDispatch = () => fetchJson('/api/v2/dispatch');
 
 // Monotonic token so a slow, stale region response can never overwrite the
 // latest selection (or clear a newer request's busy state).
@@ -182,22 +301,20 @@ async function load(region) {
   chartEl.classList.add('opacity-50'); // refetch keeps the previous frame
   chartEl.setAttribute('aria-busy', 'true');
   try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      let detail = `HTTP ${res.status}`;
-      try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }
-      throw new Error(detail);
-    }
-    const payload = await res.json();
+    const [payload, dispatch] = await Promise.all([
+      fetchJson(url),
+      overlaysWanted() ? fetchDispatch() : Promise.resolve(null),
+    ]);
     if (loadId !== activeLoad) return;
     state.payload = payload;
+    state.dispatch = dispatch; // null when no overlay is on — refetched fresh at first toggle
     state.region = region;
     $('error-alert').classList.add('hidden');
     render();
   } catch (err) {
     if (loadId !== activeLoad) return;
-    console.error('fuel-mix load failed:', err);
-    showError(err instanceof Error ? err.message : String(err));
+    console.error('dashboard load failed:', err);
+    showError(`Failed to load: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     if (loadId === activeLoad) {
       chartEl.classList.remove('opacity-50');
@@ -219,9 +336,45 @@ function renderRegionFilter() {
       if (value === state.region) return;
       await load(value);
       renderRegionFilter();
+      updateOverlayControls();
     });
     nav.append(btn);
   }
+}
+
+// Overlay toggles (LAB-1700), OFF by default. The dispatch payload is fetched
+// lazily on the first toggle-on and kept fresh by load(); price is disabled
+// on the NEM-wide view because there is no NEM-wide spot price.
+function updateOverlayControls() {
+  const price = $('overlay-price');
+  price.disabled = state.region === '';
+  price.closest('label').classList.toggle('opacity-50', price.disabled);
+}
+
+function initOverlays() {
+  for (const kind of ['price', 'demand']) {
+    const box = $(`overlay-${kind}`);
+    box.addEventListener('change', async () => {
+      state.overlays[kind] = box.checked;
+      if (box.checked && !state.dispatch) {
+        const loadId = activeLoad; // bail if a region switch lands mid-fetch
+        try {
+          const dispatch = await fetchDispatch();
+          if (loadId !== activeLoad) return;
+          state.dispatch = dispatch;
+        } catch (err) {
+          console.error('dispatch overlay load failed:', err);
+          showError(`Failed to load price/demand: ${err instanceof Error ? err.message : String(err)}`);
+          box.checked = false;
+          state.overlays[kind] = false;
+          return;
+        }
+      }
+      renderChart();
+      renderReadout(null);
+    });
+  }
+  updateOverlayControls();
 }
 
 // Theme toggle: explicit choice persists; OS changes apply only while the
@@ -261,4 +414,5 @@ $('error-retry').addEventListener('click', () => load(state.region));
 
 initTheme();
 renderRegionFilter();
+initOverlays();
 load('');

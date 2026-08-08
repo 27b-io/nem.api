@@ -39,10 +39,24 @@
   </header>
 
   <main class="mx-auto max-w-6xl space-y-4 p-4">
-    <!-- Filter row: region is the one MVP filter (LAB-419 AC). -->
-    <nav class="flex flex-wrap items-center gap-3" aria-label="Region filter">
-      <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Region</span>
-      <div class="join" id="region-filter" role="group"></div>
+    <!-- Filter row: region filter (LAB-419) + chart overlays (LAB-1700). -->
+    <nav class="flex flex-wrap items-center gap-x-5 gap-y-2" aria-label="Region filter and chart overlays">
+      <span class="flex items-center gap-3">
+        <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Region</span>
+        <span class="join" id="region-filter" role="group"></span>
+      </span>
+      <span class="flex items-center gap-3">
+        <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Overlays</span>
+        <label class="flex cursor-pointer items-center gap-1.5 text-sm">
+          <input type="checkbox" class="checkbox checkbox-xs" id="overlay-demand">
+          Demand
+        </label>
+        <label class="flex cursor-pointer items-center gap-1.5 text-sm"
+               title="Spot price needs a single region — the NEM has no NEM-wide price.">
+          <input type="checkbox" class="checkbox checkbox-xs" id="overlay-price">
+          Price
+        </label>
+      </span>
     </nav>
 
     <section class="card chart-surface rounded-lg border border-base-300 shadow-sm">
@@ -79,6 +93,9 @@
           nor total supply. Values are net MW: storage draws below zero while charging.
           Times are AEST (NEM market time, UTC+10, no DST); each point is the 5-minute
           interval ending at that time.
+          Overlays come from AEMO DispatchIS: price is the regional reference price (RRP,
+          $/MWh, on a symlog-style axis &mdash; negative prices are routine); demand is the
+          dispatch-run <code>TOTALDEMAND</code>, not measured operational demand.
         </p>
       </div>
     </section>

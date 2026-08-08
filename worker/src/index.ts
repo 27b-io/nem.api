@@ -1,6 +1,6 @@
 import { BACKFILL_CRON, runBackfill } from './backfill';
 import { handleApiCached } from './cache';
-import { runIngest } from './ingest';
+import { DISPATCH_IS_FEED, runIngest, SCADA_FEED } from './ingest';
 
 export interface Env {
   DB: D1Database;
@@ -32,18 +32,34 @@ export default {
   },
 
   // Two cron schedules share this handler (wrangler.toml), dispatched on the
-  // exact cron string: the offset schedule runs the ARCHIVE backfill, anything
-  // else the 5-minute CURRENT ingest — so a drifted backfill expression
+  // exact cron string: the offset schedule runs the ARCHIVE backfills, anything
+  // else the 5-minute CURRENT ingests — so a drifted backfill expression
   // degrades to extra idempotent ingest runs, never a silent no-op handler.
-  // Per-file/day errors are isolated inside each runner; a throw here (e.g.
-  // the listing fetch itself failing) marks the cron invocation failed in the
-  // dashboard, which is exactly the visibility we want — the next run catches
-  // up regardless.
+  // Both feeds (SCADA, DispatchIS — LAB-1700) run sequentially per invocation
+  // with per-feed isolation: one feed's run-level failure (e.g. its listing
+  // fetch) must not starve the other, but is still rethrown afterwards so the
+  // invocation shows failed in the dashboard — the next run catches up
+  // regardless. Per-file/day errors are isolated inside each runner.
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    if (controller.cron === BACKFILL_CRON) {
-      await runBackfill(env);
-      return;
+    const backfill = controller.cron === BACKFILL_CRON;
+    const runs: Array<[label: string, run: () => Promise<unknown>]> = backfill
+      ? [
+          ['backfill:scada', () => runBackfill(env, SCADA_FEED)],
+          ['backfill:dispatchis', () => runBackfill(env, DISPATCH_IS_FEED)],
+        ]
+      : [
+          ['ingest:scada', () => runIngest(env, SCADA_FEED)],
+          ['ingest:dispatchis', () => runIngest(env, DISPATCH_IS_FEED)],
+        ];
+    let firstError: unknown;
+    for (const [label, run] of runs) {
+      try {
+        await run();
+      } catch (err) {
+        console.error(`${label}: run failed:`, err);
+        firstError ??= err;
+      }
     }
-    await runIngest(env);
+    if (firstError !== undefined) throw firstError;
   },
 } satisfies ExportedHandler<Env>;

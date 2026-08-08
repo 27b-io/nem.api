@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
-import { extractZipFilenames, loadDuidMap, upsertValues } from '../src/ingest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { DISPATCH_IS_FEED, extractZipFilenames, loadDuidMap, upsertDispatchRows, upsertValues } from '../src/ingest';
 
 describe('upsertValues', () => {
   it('is idempotent: inserting the same key twice leaves one row, last value wins', async () => {
@@ -26,6 +26,102 @@ describe('upsertValues', () => {
     await upsertValues(env.DB, rows);
     const result = await env.DB.prepare('SELECT count(*) AS n FROM scada_values').first<{ n: number }>();
     expect(result?.n).toBe(70);
+  });
+});
+
+describe('upsertDispatchRows', () => {
+  beforeEach(async () => {
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM dispatch_region'),
+      env.DB.prepare('DELETE FROM dispatch_interconnector'),
+    ]);
+  });
+
+  async function regionRow(time: number, region: string) {
+    return env.DB.prepare('SELECT rrp, total_demand FROM dispatch_region WHERE settlement_time = ? AND region = ?')
+      .bind(time, region)
+      .first<{ rrp: number | null; total_demand: number | null }>();
+  }
+
+  it('is idempotent and COALESCEs per column: a partial row never nulls out the other column', async () => {
+    // First pass carries price only (as if REGIONSUM were absent from a file).
+    await upsertDispatchRows(env.DB, {
+      regions: [{ settlementTime: 1784900100, region: 'NSW1', rrp: 110.01, totalDemand: null }],
+      interconnectors: [],
+    });
+    expect(await regionRow(1784900100, 'NSW1')).toEqual({ rrp: 110.01, total_demand: null });
+
+    // Second pass carries demand only — must merge, not overwrite rrp with null.
+    await upsertDispatchRows(env.DB, {
+      regions: [{ settlementTime: 1784900100, region: 'NSW1', rrp: null, totalDemand: 9655.98 }],
+      interconnectors: [],
+    });
+    expect(await regionRow(1784900100, 'NSW1')).toEqual({ rrp: 110.01, total_demand: 9655.98 });
+
+    // Full re-ingest: last non-null values win, still one row.
+    await upsertDispatchRows(env.DB, {
+      regions: [{ settlementTime: 1784900100, region: 'NSW1', rrp: 120, totalDemand: 9700 }],
+      interconnectors: [{ settlementTime: 1784900100, interconnector: 'V-SA', meteredMwFlow: -79.3 }],
+    });
+    await upsertDispatchRows(env.DB, {
+      regions: [],
+      interconnectors: [{ settlementTime: 1784900100, interconnector: 'V-SA', meteredMwFlow: -80.1 }],
+    });
+    expect(await regionRow(1784900100, 'NSW1')).toEqual({ rrp: 120, total_demand: 9700 });
+    const counts = await env.DB.prepare(
+      'SELECT (SELECT count(*) FROM dispatch_region) AS r, (SELECT count(*) FROM dispatch_interconnector) AS i, ' +
+        "(SELECT metered_mw_flow FROM dispatch_interconnector WHERE interconnector = 'V-SA') AS flow",
+    ).first<{ r: number; i: number; flow: number }>();
+    expect(counts).toEqual({ r: 1, i: 1, flow: -80.1 });
+  });
+
+  it('chunks large batches across the D1 bound-parameter limit', async () => {
+    // 60 region rows spans three 25-row chunks; 70 interconnector rows three 32-row chunks.
+    await upsertDispatchRows(env.DB, {
+      regions: Array.from({ length: 60 }, (_, i) => ({
+        settlementTime: 1784900100 + i * 300,
+        region: 'NSW1',
+        rrp: i,
+        totalDemand: i * 10,
+      })),
+      interconnectors: Array.from({ length: 70 }, (_, i) => ({
+        settlementTime: 1784900100 + i * 300,
+        interconnector: 'V-SA',
+        meteredMwFlow: i,
+      })),
+    });
+    const counts = await env.DB.prepare(
+      'SELECT (SELECT count(*) FROM dispatch_region) AS r, (SELECT count(*) FROM dispatch_interconnector) AS i',
+    ).first<{ r: number; i: number }>();
+    expect(counts).toEqual({ r: 60, i: 70 });
+  });
+});
+
+describe('DISPATCH_IS_FEED processor', () => {
+  it('parse throws on a CSV with no ingestable rows (format drift stays loud)', async () => {
+    const processor = await DISPATCH_IS_FEED.createProcessor(env);
+    expect(() => processor.parse('C,NEMP.WORLD,DISPATCHIS,AEMO\r\n', 'test')).toThrow(/no DISPATCH/);
+  });
+
+  it('parse + store round-trips through D1', async () => {
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM dispatch_region'),
+      env.DB.prepare('DELETE FROM dispatch_interconnector'),
+    ]);
+    const processor = await DISPATCH_IS_FEED.createProcessor(env);
+    const csv =
+      'I,DISPATCH,PRICE,5,SETTLEMENTDATE,RUNNO,REGIONID,DISPATCHINTERVAL,INTERVENTION,RRP\r\n' +
+      'D,DISPATCH,PRICE,5,"2026/08/08 20:25:00",1,NSW1,20260808197,0,110.01\r\n' +
+      'I,DISPATCH,INTERCONNECTORRES,3,SETTLEMENTDATE,RUNNO,INTERCONNECTORID,DISPATCHINTERVAL,INTERVENTION,METEREDMWFLOW\r\n' +
+      'D,DISPATCH,INTERCONNECTORRES,3,"2026/08/08 20:25:00",1,V-SA,20260808197,0,-79.3\r\n';
+    const { batch, rows, intervals } = processor.parse(csv, 'test');
+    expect(rows).toBe(2);
+    expect(intervals.size).toBe(1);
+    expect(await processor.store([batch])).toBe(2);
+    const counts = await env.DB.prepare(
+      'SELECT (SELECT count(*) FROM dispatch_region) AS r, (SELECT count(*) FROM dispatch_interconnector) AS i',
+    ).first<{ r: number; i: number }>();
+    expect(counts).toEqual({ r: 1, i: 1 });
   });
 });
 

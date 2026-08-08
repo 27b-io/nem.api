@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { upsertValues } from '../src/ingest';
+import { upsertDispatchRows, upsertValues } from '../src/ingest';
 import worker from '../src/index';
 
 // Fixed dispatch-interval base, aligned to an hour boundary (divisible by 300,
@@ -32,7 +32,7 @@ let er01: number;
 beforeEach(async () => {
   // vitest-pool-workers 0.18 (cloudflareTest plugin) has no per-test storage
   // isolation — tests in a file share one D1, so clear values explicitly.
-  await env.DB.prepare('DELETE FROM scada_values').run();
+  await env.DB.batch([env.DB.prepare('DELETE FROM scada_values'), env.DB.prepare('DELETE FROM dispatch_region')]);
   host = `t-${crypto.randomUUID()}.test`;
   baps = await gidOf('BAPS');
   bw01 = await gidOf('BW01');
@@ -404,5 +404,104 @@ describe('routing', () => {
 
     const post = await worker.fetch(new Request('https://nem-api.test/api/v2/values', { method: 'POST' }), env);
     expect(post.status).toBe(405);
+  });
+});
+
+interface DispatchBody {
+  start: number | null;
+  end: number | null;
+  resolution: number;
+  truncated: boolean;
+  timestamps: number[];
+  series: Array<{
+    region: string;
+    price: (number | null)[];
+    price_max: (number | null)[];
+    demand: (number | null)[];
+  }>;
+}
+
+describe('/api/v2/dispatch (LAB-1700)', () => {
+  it('returns per-region price/price_max/demand on the shared time axis, with null gaps', async () => {
+    await upsertDispatchRows(env.DB, {
+      regions: [
+        { settlementTime: T0, region: 'NSW1', rrp: 110.01, totalDemand: 9000 },
+        { settlementTime: T0 + 300, region: 'NSW1', rrp: -8.5, totalDemand: 9100 },
+        // SA1 has no sample at T0+300 -> nulls in its aligned arrays.
+        { settlementTime: T0, region: 'SA1', rrp: 50, totalDemand: 1700 },
+      ],
+      interconnectors: [],
+    });
+
+    const res = await get(`/api/v2/dispatch?time_start=${T0}&time_end=${T0 + 300}&resolution=300`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+
+    const body = await res.json<DispatchBody>();
+    expect(body.resolution).toBe(300);
+    expect(body.truncated).toBe(false);
+    expect(body.timestamps).toEqual([T0, T0 + 300]);
+    expect(body.series).toEqual([
+      // Negative price passes through — a routine NEM state, never clamped.
+      { region: 'NSW1', price: [110.01, -8.5], price_max: [110.01, -8.5], demand: [9000, 9100] },
+      { region: 'SA1', price: [50, null], price_max: [50, null], demand: [1700, null] },
+    ]);
+  });
+
+  it('buckets price as BOTH mean and max — a spike must survive an hourly bucket', async () => {
+    // 12 five-minute intervals in the hour ending T0+3600: eleven at $100,
+    // one $10,000 spike. Demand constant 5000.
+    await upsertDispatchRows(env.DB, {
+      regions: Array.from({ length: 12 }, (_, i) => ({
+        settlementTime: T0 + (i + 1) * 300,
+        region: 'VIC1',
+        rrp: i === 6 ? 10000 : 100,
+        totalDemand: 5000,
+      })),
+      interconnectors: [],
+    });
+
+    const body = await (
+      await get(`/api/v2/dispatch?time_start=${T0}&time_end=${T0 + 3600}&resolution=3600`)
+    ).json<DispatchBody>();
+    expect(body.timestamps).toEqual([T0 + 3600]);
+    expect(body.series).toHaveLength(1);
+    const vic = body.series[0];
+    expect(vic.price).toEqual([925]); // (11×100 + 10000) / 12
+    expect(vic.price_max).toEqual([10000]);
+    expect(vic.demand).toEqual([5000]);
+  });
+
+  it('filters by region with the canonical param, its state alias, and IN lists', async () => {
+    await upsertDispatchRows(env.DB, {
+      regions: [
+        { settlementTime: T0, region: 'NSW1', rrp: 1, totalDemand: 1 },
+        { settlementTime: T0, region: 'VIC1', rrp: 2, totalDemand: 2 },
+        { settlementTime: T0, region: 'SA1', rrp: 3, totalDemand: 3 },
+      ],
+      interconnectors: [],
+    });
+    const regionsOf = async (q: string) =>
+      (await (await get(`/api/v2/dispatch?time=${T0}${q}`)).json<DispatchBody>()).series.map((s) => s.region);
+
+    expect(await regionsOf('&region=VIC1')).toEqual(['VIC1']);
+    expect(await regionsOf('&state=VIC1')).toEqual(['VIC1']);
+    expect(await regionsOf('&region=NSW1,SA1')).toEqual(['NSW1', 'SA1']);
+    expect(await regionsOf('')).toEqual(['NSW1', 'SA1', 'VIC1']);
+  });
+
+  it('nulls a metric the ingest has not carried yet (partial rows)', async () => {
+    await upsertDispatchRows(env.DB, {
+      regions: [{ settlementTime: T0, region: 'TAS1', rrp: 8.76, totalDemand: null }],
+      interconnectors: [],
+    });
+    const body = await (await get(`/api/v2/dispatch?time=${T0}`)).json<DispatchBody>();
+    expect(body.series).toEqual([{ region: 'TAS1', price: [8.76], price_max: [8.76], demand: [null] }]);
+  });
+
+  it('rejects malformed params like the sibling endpoints', async () => {
+    expect((await get('/api/v2/dispatch?resolution=42')).status).toBe(400);
+    expect((await get('/api/v2/dispatch?hours=-3')).status).toBe(400);
+    expect((await get('/api/v2/dispatch?limit=0')).status).toBe(400);
   });
 });

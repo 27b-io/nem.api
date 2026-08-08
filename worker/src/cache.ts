@@ -33,6 +33,7 @@ import type { Env } from './index';
 import { nemBucket } from './rollups';
 import {
   CORS_HEADERS,
+  DISPATCH_FILTERS,
   firstParam,
   GENERATOR_FILTERS,
   handleApi,
@@ -132,10 +133,10 @@ function responseHeaders(maxAge: number, expires: number, xCache: 'HIT' | 'MISS'
   return headers;
 }
 
-/** Canonical generator-filter key parts; comma lists sort (IN() is unordered). */
-function filterParts(params: URLSearchParams): string[] {
+/** Canonical filter key parts; comma lists sort (IN() is unordered). */
+function filterParts(params: URLSearchParams, filters: Array<{ column: string; aliases: string[] }>): string[] {
   const parts: string[] = [];
-  for (const { column, aliases } of GENERATOR_FILTERS) {
+  for (const { column, aliases } of filters) {
     const raw = firstParam(params, aliases);
     if (raw === undefined) continue;
     const value = raw.includes(',')
@@ -167,9 +168,9 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
 
   try {
     if (route === '/api/v2/generators') {
-      parts.push(...filterParts(params));
+      parts.push(...filterParts(params, GENERATOR_FILTERS));
       ttl = GENERATORS_TTL_SECONDS;
-    } else if (route === '/api/v2/values' || route === '/api/v2/values/aggregate') {
+    } else if (route === '/api/v2/values' || route === '/api/v2/values/aggregate' || route === '/api/v2/dispatch') {
       if (route === '/api/v2/values/aggregate') {
         // group_by is echoed verbatim in the body, so `region` and its
         // storage alias `state` are distinct responses — no collapsing here.
@@ -197,8 +198,14 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
       const resolution = resolveResolution(params, window, nowSeconds);
       parts.push(`res=${resolution}`);
       const { limit, offset } = resolveLimit(params);
-      parts.push(`lim=${limit}`, `off=${offset}`, `ord=${resolveOrder(params)}`);
-      parts.push(...filterParts(params));
+      parts.push(`lim=${limit}`, `off=${offset}`);
+      if (route === '/api/v2/dispatch') {
+        // dispatch has no sort and only the region filter — a `sort=` or
+        // `fuel=` the handler ignores must not fragment the cache.
+        parts.push(...filterParts(params, DISPATCH_FILTERS));
+      } else {
+        parts.push(`ord=${resolveOrder(params)}`, ...filterParts(params, GENERATOR_FILTERS));
+      }
 
       // Upper bound of the data the window can see (t = exact matches only).
       let upper =
