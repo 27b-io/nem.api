@@ -9,7 +9,9 @@
 // (read-heavy public APIs); the Cache API backend is a per-colo
 // point-of-presence tier, which is the right shape here because the
 // authoritative copy is D1 itself and every entry is re-derivable. No
-// encryption/compression/SaaS tier on this pass (ticket non-goals).
+// encryption/SaaS tier: the data is public and re-derivable, and there is one
+// SDK and one worker, so neither buys anything here. Compression IS on
+// (LAB-1765) — see cacheInstance().
 //
 // Key properties (also the abuse posture):
 // - Canonical keys: alias params collapse onto their canonical name and time
@@ -60,15 +62,30 @@ export const CLOSED_WINDOW_TTL_SECONDS = 86400;
 export const GENERATORS_TTL_SECONDS = 3600;
 
 // Bump to invalidate every existing entry on a key-format, CachedResponse
-// shape, or policy change — get<CachedResponse> is a blind cast, so a shape
-// change without a bump would deserialize stale entries with missing fields.
+// shape, or policy change. isCachedResponse() below is the backstop for a
+// forgotten bump, not a substitute for one: it turns a mismatched entry into a
+// miss, which is correct but costs a D1 refill on every request until the old
+// entries lapse.
 // k2: LAB-1696 changed aggregate values at resolution 3600/86400 (rollup
 // path: full-bucket edge semantics, global-denominator means) — pre-rollup
 // entries must not survive the cutover.
 // k3: LAB-1721 routed `values` at 3600/86400 to the same rollups (full-bucket
 // edge semantics) and changed its TTL policy to match — pre-cutover `values`
 // entries at those resolutions must not survive either.
-const KEY_VERSION = 'k3';
+// k4: LAB-1765 turned compression on, which changes the STORED BYTES, not just
+// the shape: entries are now a ByteStorage envelope (LZ4 + xxHash3-64) instead
+// of bare MessagePack. The envelope reader cannot decode a k3 entry, and
+// createCache.minimal sets degradation:false, so the get THROWS — survivable
+// (handleApiCached catches, logs and serves from D1, and the refill overwrites
+// the entry) but it would fire once per live key across the whole deploy. A
+// version bump buys the same refill at the same cost without the error storm.
+// A REVERT needs a bump too, and for a worse reason: the envelope is itself
+// valid positional MessagePack, so a compression-off reader DECODES a k4 entry
+// successfully and hands the envelope tuple back as the value — not a miss
+// (cachekit-ts finding, LAB-1388; the tolerant read path that fixes it is
+// merged upstream but unreleased as of 0.1.5). That is what isCachedResponse()
+// catches: without it, the tuple's absent `body` was served as an empty 200.
+const KEY_VERSION = 'k4';
 
 /**
  * Seconds until this entry must expire so it never outlives the data:
@@ -88,6 +105,10 @@ interface CacheEntry {
   ttl: number;
 }
 
+// Exported so tests bind to the SAME caps as production — a test-local copy
+// silently stops testing the real config the moment either number moves.
+export const SERIALIZER_LIMITS = { maxEncodedSize: 64 * 1024 * 1024, maxDecodedSize: 64 * 1024 * 1024 };
+
 // One cache per isolate, per the SDK's own guidance — per-request creation
 // leaks wasm allocations on hot isolates. Lazy so module init stays
 // side-effect-free. Exported for tests (they must exercise THIS configured
@@ -97,9 +118,31 @@ let cache: WorkersCache | null = null;
 export function cacheInstance(): WorkersCache {
   cache ??= createCache.minimal({
     backend: workersCacheAPI(),
-    // Ticket non-goal, and the values are served-as-is JSON — skip the wasm
-    // ByteStorage envelope (cachekit defaults compression ON).
-    compression: false,
+    // LZ4 + xxHash3-64 ByteStorage envelope, via the wasm32 cachekit-core
+    // build. Bodies here are columnar JSON (repeated key names, long runs of
+    // `null` gaps, comma-separated floats) — the shape LZ4 eats. Measured
+    // (LAB-1765, miniflare workerd, 10 rounds, /values bodies at 600 series):
+    //
+    //   288 buckets (the default 24 h query, 966 KiB JSON)
+    //     stored  966 -> 350 KiB (2.76x)   set 7.3 -> 17.3 ms   get 1.0 -> 8.5 ms
+    //   500 buckets (300000 rows, the MAX_LIMIT ceiling, 1653 KiB JSON)
+    //     stored 1653 -> 606 KiB (2.73x)   set 8.9 -> 25.4 ms   get 1.2 -> 13.7 ms
+    //
+    // So this is NOT free: a hit costs ~8 ms more, ~14 ms at the ceiling, and
+    // that is CPU, not I/O. Kept because Cache API storage is free and the
+    // real currency is retention — entries are 0.3-1.6 MB and colo LRU evicts
+    // the big ones first, so 2.7x more resident entries is a direct hit-rate
+    // lever, and the added milliseconds stay an order below the D1 aggregation
+    // over up to 300000 rows that a miss costs. Revert (with a KEY_VERSION
+    // bump, see above) if wrangler tail shows hit-path CPU near the limit.
+    // The wasm module is a static import in cachekit's Workers runtime, so it
+    // is in the bundle whether or not this is on — verified byte-identical at
+    // 373.44 KiB / 113.30 KiB gz either way. Off was paying for it unused.
+    // Written explicitly rather than left to the default ON: cachekit is
+    // adding a per-backend `compressionDefault` and CacheAPIBackend will
+    // advertise FALSE, so relying on the default would silently un-compress
+    // this cache on a future upgrade.
+    compression: true,
     // cachekit's L1 would repopulate on an L2 hit with ITS default TTL
     // (cache-core get(): ttlSeconds ?? defaultTtl), not the entry's remaining
     // lifetime — an isolate could serve a boundary-TTL entry past the
@@ -111,7 +154,12 @@ export function cacheInstance(): WorkersCache {
     // 1 MiB encode default would throw ValueTooLargeError on exactly the
     // heaviest queries — caught and logged, but silently never cached.
     // 64 MiB covers realistic maxima; anything larger falls through uncached.
-    serializer: { maxEncodedSize: 64 * 1024 * 1024, maxDecodedSize: 64 * 1024 * 1024 },
+    // Compression does NOT relax this: both caps sit on the UNCOMPRESSED side
+    // of the envelope (encode caps the msgpack before pack(), decode caps the
+    // plaintext after unpack()), so the body ceiling is unchanged and only the
+    // stored bytes shrink. Neither cap bounds decompression itself, which is
+    // fine here — every envelope in this cache was written by this worker.
+    serializer: SERIALIZER_LIMITS,
   });
   return cache;
 }
@@ -120,6 +168,27 @@ export function cacheInstance(): WorkersCache {
 interface CachedResponse {
   body: string;
   expires: number;
+}
+
+/**
+ * `get<CachedResponse>` is a blind cast, and the ways it can hand back
+ * something else are not hypothetical: a stored-format change without a
+ * KEY_VERSION bump, or a compression flip against a store holding the other
+ * format (the ByteStorage envelope is valid positional MessagePack, so a
+ * plain reader DECODES it and returns the 4-tuple). Unchecked, `body`
+ * undefined becomes `new Response(undefined)` — an empty 200 served with
+ * `x-cache: HIT` and cached client-side for the whole TTL, with nothing
+ * logged. Everything else in this layer fails closed; this is the one path
+ * that failed open, so it gets an explicit shape check and a miss on
+ * anything unrecognised.
+ */
+function isCachedResponse(value: unknown): value is CachedResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as CachedResponse).body === 'string' &&
+    typeof (value as CachedResponse).expires === 'number'
+  );
 }
 
 /**
@@ -275,7 +344,15 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
 
   let hit: CachedResponse | null = null;
   try {
-    hit = await cacheInstance().get<CachedResponse>(entry.key);
+    const stored = await cacheInstance().get(entry.key);
+    if (stored !== null && !isCachedResponse(stored)) {
+      // A decodable entry that is not ours: loud, because the only ways to get
+      // here are a missed KEY_VERSION bump or a stored-format mismatch, and
+      // both are silent everywhere else.
+      console.error(`cache entry ignored, unexpected shape (${entry.key})`);
+    } else {
+      hit = stored;
+    }
   } catch (err) {
     console.error(`cache get failed (${entry.key}):`, err);
   }
