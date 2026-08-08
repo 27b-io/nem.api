@@ -12,16 +12,25 @@
    was validated against (dataviz six-checks validator; see app.js). The card
    backgrounds use these literals rather than daisyUI base-100 so a future
    daisyUI theme tweak can't silently invalidate the palette's contrast run. */
+/* --chart-intensity-ink is the carbon-intensity overlay (LAB-1698). It is
+   deliberately ACHROMATIC and at the lightness extreme: every fuel fill is
+   chromatic and mid-lightness, and the palette's own CVD mechanism is
+   lightness separation (protanopia collapses hue, L survives), so an
+   ink-black/paper-white line cannot be confused with any band under any
+   simulation. It is also a line on a second axis, not another area — a
+   different kind of quantity should not compete for a hue slot. */
 :root,
 [data-theme="light"] {
   --chart-surface: #ffffff;
   --chart-grid: #e1e0d9;
   --chart-axis-ink: #898781;
+  --chart-intensity-ink: #17150f;
 }
 [data-theme="dark"] {
   --chart-surface: #1d232a;
   --chart-grid: #2c2c2a;
   --chart-axis-ink: #898781;
+  --chart-intensity-ink: #f4f1e8;
 }
 
 .chart-surface {

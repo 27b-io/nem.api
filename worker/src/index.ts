@@ -1,6 +1,15 @@
 import { BACKFILL_CRON, runBackfill } from './backfill';
 import { handleApiCached } from './cache';
+import { CDEII_CRON, refreshCdeii } from './cdeii';
 import { DISPATCH_IS_FEED, type Feed, runIngest, SCADA_FEED } from './ingest';
+
+// NOTE: this module must export NOTHING but the default handler. workerd reads
+// every named export of the entrypoint as an entry in the Worker's handler map
+// and refuses to start on anything that isn't a function or ExportedHandler
+// ("Incorrect type for map entry ..."), so schedule constants live beside their
+// runner (BACKFILL_CRON in ./backfill, CDEII_CRON in ./cdeii) rather than here.
+// test/index.spec.ts guards this — the vitest pool imports the handler object
+// directly and never exercises workerd's validation.
 
 export interface Env {
   DB: D1Database;
@@ -31,16 +40,21 @@ export default {
     return new Response('Not found', { status: 404 });
   },
 
-  // Two cron schedules share this handler (wrangler.toml), dispatched on the
-  // exact cron string: the offset schedule runs the ARCHIVE backfills, anything
-  // else the 5-minute CURRENT ingests — so a drifted backfill expression
-  // degrades to extra idempotent ingest runs, never a silent no-op handler.
+  // Three cron schedules share this handler (wrangler.toml), dispatched on the
+  // exact cron string: one runs the ARCHIVE backfills, one the daily CDEII
+  // emissions refresh, anything else the 5-minute CURRENT ingests — so a
+  // drifted expression degrades to extra idempotent ingest runs, never a
+  // silent no-op handler.
   // Both feeds (SCADA, DispatchIS — LAB-1700) run sequentially per invocation
   // with per-feed isolation: one feed's run-level failure (e.g. its listing
   // fetch) must not starve the other, but is still rethrown afterwards so the
   // invocation shows failed in the dashboard — the next run catches up
   // regardless. Per-file/day errors are isolated inside each runner.
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    if (controller.cron === CDEII_CRON) {
+      await refreshCdeii(env);
+      return;
+    }
     const backfill = controller.cron === BACKFILL_CRON;
     // Generic helper (not a .map over the two feeds) so each Feed<Batch>
     // instantiates concretely; the label derives from feed.label so the
