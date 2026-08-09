@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { refreshTouchedRollups, upsertDispatchRows, upsertValues } from '../src/ingest';
+import { refreshTouchedRollups, upsertDispatchRows, upsertRooftopRows, upsertValues } from '../src/ingest';
 import worker from '../src/index';
 
 // Fixed dispatch-interval base, aligned to an hour boundary (divisible by 300,
@@ -549,5 +549,88 @@ describe('/api/v2/dispatch (LAB-1700)', () => {
     expect((await get('/api/v2/dispatch?resolution=42')).status).toBe(400);
     expect((await get('/api/v2/dispatch?hours=-3')).status).toBe(400);
     expect((await get('/api/v2/dispatch?limit=0')).status).toBe(400);
+  });
+});
+
+interface RooftopBody {
+  start: number | null;
+  end: number | null;
+  resolution: number;
+  truncated: boolean;
+  timestamps: number[];
+  series: Array<{ region: string; power: (number | null)[] }>;
+}
+
+describe('/api/v2/rooftop (LAB-1701)', () => {
+  beforeEach(async () => {
+    await env.DB.prepare('DELETE FROM rooftop_pv').run();
+  });
+
+  it('returns per-region 30-min power on the shared time axis, with null gaps for missing regions', async () => {
+    await upsertRooftopRows(env.DB, [
+      { intervalTime: T0 + 1800, region: 'NSW1', power: 4188.5, quality: 1 },
+      { intervalTime: T0 + 3600, region: 'NSW1', power: 4200, quality: 1 },
+      // VIC1 has no estimate at T0+3600 -> null in its aligned array.
+      { intervalTime: T0 + 1800, region: 'VIC1', power: 3100.2, quality: 0.7 },
+    ]);
+
+    const res = await get(`/api/v2/rooftop?time_start=${T0}&time_end=${T0 + 3600}&resolution=1800`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+
+    const body = await res.json<RooftopBody>();
+    expect(body.resolution).toBe(1800);
+    expect(body.truncated).toBe(false);
+    expect(body.timestamps).toEqual([T0 + 1800, T0 + 3600]);
+    expect(body.series).toEqual([
+      { region: 'NSW1', power: [4188.5, 4200] },
+      { region: 'VIC1', power: [3100.2, null] },
+    ]);
+  });
+
+  it('at resolution 300 buckets exist only on half-hour boundaries — the live edge is ABSENT, never zero', async () => {
+    // The last published estimate ends at T0+1800; a window reaching another
+    // half hour past it must not invent buckets after that.
+    await upsertRooftopRows(env.DB, [{ intervalTime: T0 + 1800, region: 'NSW1', power: 500, quality: 1 }]);
+    const body = await (
+      await get(`/api/v2/rooftop?time_start=${T0}&time_end=${T0 + 3600}&resolution=300`)
+    ).json<RooftopBody>();
+    // One bucket, at the half-hour mark — not six 5-min buckets, no
+    // trailing zeros where the estimate does not yet exist.
+    expect(body.timestamps).toEqual([T0 + 1800]);
+    expect(body.series).toEqual([{ region: 'NSW1', power: [500] }]);
+  });
+
+  it('averages 30-min estimates into coarser buckets', async () => {
+    await upsertRooftopRows(env.DB, [
+      { intervalTime: T0 + 1800, region: 'SA1', power: 100, quality: 1 },
+      { intervalTime: T0 + 3600, region: 'SA1', power: 300, quality: 1 },
+    ]);
+    const body = await (
+      await get(`/api/v2/rooftop?time_start=${T0}&time_end=${T0 + 3600}&resolution=3600`)
+    ).json<RooftopBody>();
+    expect(body.timestamps).toEqual([T0 + 3600]);
+    expect(body.series).toEqual([{ region: 'SA1', power: [200] }]);
+  });
+
+  it('filters by region with the canonical param, its state alias, and IN lists', async () => {
+    await upsertRooftopRows(env.DB, [
+      { intervalTime: T0 + 1800, region: 'NSW1', power: 1, quality: 1 },
+      { intervalTime: T0 + 1800, region: 'VIC1', power: 2, quality: 1 },
+      { intervalTime: T0 + 1800, region: 'SA1', power: 3, quality: 1 },
+    ]);
+    const regionsOf = async (q: string) =>
+      (await (await get(`/api/v2/rooftop?time=${T0 + 1800}${q}`)).json<RooftopBody>()).series.map((s) => s.region);
+
+    expect(await regionsOf('&region=VIC1')).toEqual(['VIC1']);
+    expect(await regionsOf('&state=VIC1')).toEqual(['VIC1']);
+    expect(await regionsOf('&region=NSW1,SA1')).toEqual(['NSW1', 'SA1']);
+    expect(await regionsOf('')).toEqual(['NSW1', 'SA1', 'VIC1']);
+  });
+
+  it('rejects malformed params like the sibling endpoints', async () => {
+    expect((await get('/api/v2/rooftop?resolution=42')).status).toBe(400);
+    expect((await get('/api/v2/rooftop?hours=-3')).status).toBe(400);
+    expect((await get('/api/v2/rooftop?limit=0')).status).toBe(400);
   });
 });

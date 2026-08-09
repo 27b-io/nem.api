@@ -20,7 +20,17 @@ export const FUEL_SLOTS = [
   { key: 'Hydro',     label: 'Hydro',             light: '#2f7ec7', dark: '#4a94dd' },
   { key: 'Wind',      label: 'Wind',              light: '#2e7031', dark: '#34803c' },
   { key: 'Solar',     label: 'Solar',             light: '#eda100', dark: '#c98500' },
+  // Rooftop solar (LAB-1701): NOT an aggregate fuel key — app.js appends a
+  // pseudo-series under ROOFTOP_KEY from /api/v2/rooftop (AEMO's 30-minute
+  // estimate). Adjacent to Solar by design; the darker gold is the
+  // protanopia-safe lightness step against Solar's bright yellow, re-run
+  // through the six-checks validator with the full stack on both surfaces
+  // (2026-08-09): zero new deviations vs the shipped baseline.
+  { key: 'Rooftop solar', label: 'Rooftop solar (est.)', light: '#b87d00', dark: '#9c6d00' },
 ];
+
+/** The pseudo-series key app.js injects for the rooftop band. */
+export const ROOFTOP_KEY = 'Rooftop solar';
 
 // The 2015 seed has no batteries; the LAB-421 registration refresh will add
 // them with an AEMO key like "Battery storage" — match loosely so they land

@@ -7,6 +7,7 @@ import {
   CLOSED_WINDOW_TTL_SECONDS,
   GENERATORS_TTL_SECONDS,
   INGEST_GRACE_SECONDS,
+  ROOFTOP_PUBLICATION_GRACE_SECONDS,
 } from '../src/cache';
 import { upsertValues } from '../src/ingest';
 import worker from '../src/index';
@@ -102,6 +103,24 @@ describe('buildCacheEntry — key canonicalisation', () => {
     // windows to the dispatch boundary.
     expect(dis(`?time_start=${T0}&time_end=${T0 + 600}`).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
     expect(dis('?hours=24', NOW + 100).ttl).toBe(200);
+  });
+
+  it('rooftop keys: alias collapse, ignored params, and the publication-lag close (LAB-1701)', () => {
+    const roof = (q: string, now = NOW) => entryFor(q, now, 'nem-api.test', '/api/v2/rooftop')!;
+    expect(roof('?region=VIC1').key).toBe(roof('?state=VIC1').key);
+    expect(roof('?region=VIC1&sort=value,desc&fuel=Hydro').key).toBe(roof('?region=VIC1').key);
+    expect(roof(`?time_start=${T0}`).key).not.toBe(entryFor(`?time_start=${T0}`)!.key);
+    // Safely-past absolute windows cache long, relative windows to the boundary.
+    expect(roof(`?time_start=${T0}&time_end=${T0 + 3600}`).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+    expect(roof('?hours=24', NOW + 100).ttl).toBe(200);
+    // The estimate for the half-hour ending T is only PUBLISHED ~T+30min: a
+    // window ending on a just-finished half-hour must NOT close on the 5-min
+    // dispatch clock (dispatch closes this same window long already).
+    const justEnded = `?time_start=${NOW - 7200}&time_end=${NOW}`;
+    expect(entryFor(justEnded, NOW + 300, 'nem-api.test', '/api/v2/dispatch')!.ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+    expect(roof(justEnded, NOW + 300).ttl).toBe(boundaryTtl(NOW + 300));
+    // Once the publication grace has passed, it closes like the others.
+    expect(roof(justEnded, NOW + ROOFTOP_PUBLICATION_GRACE_SECONDS).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
   });
 
   it('returns null for unknown routes and malformed params (handler owns those)', () => {

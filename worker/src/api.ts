@@ -1,6 +1,6 @@
 // HTTP query API (LAB-418): /api/v2/values, /api/v2/values/aggregate,
-// /api/v2/dispatch, /api/v2/generators, /api/v2/intensity — a greenfields v2
-// contract over the D1 store. PUBLIC
+// /api/v2/dispatch, /api/v2/rooftop, /api/v2/generators, /api/v2/intensity —
+// a greenfields v2 contract over the D1 store. PUBLIC
 // (ray, 2026-07-24: public until abuse is detected), so the contract in
 // worker/API.md (owned jointly with the LAB-419 frontend) is the product.
 // The legacy restify API (api/v1.1) is reference-only, not a contract.
@@ -248,9 +248,10 @@ export const GENERATOR_FILTERS: Array<{ column: string; aliases: string[] }> = [
   { column: 'duid', aliases: ['duid'] },
 ];
 
-// The only filter /api/v2/dispatch accepts (dispatch_region has no generator
-// dimensions). Exported for src/cache.ts, same single-sourcing as above.
-export const DISPATCH_FILTERS: Array<{ column: string; aliases: string[] }> = [
+// The only filter /api/v2/dispatch and /api/v2/rooftop accept (their tables
+// have no generator dimensions — region IS the series). Exported for
+// src/cache.ts, same single-sourcing as above.
+export const REGION_FILTERS: Array<{ column: string; aliases: string[] }> = [
   { column: 'region', aliases: ['region', 'state'] },
 ];
 
@@ -578,7 +579,7 @@ async function handleDispatch(env: Env, params: URLSearchParams): Promise<Respon
   const { limit, offset } = resolveLimit(params);
 
   const where = timeClauses(window, 'settlement_time');
-  for (const { column, aliases } of DISPATCH_FILTERS) {
+  for (const { column, aliases } of REGION_FILTERS) {
     const raw = firstParam(params, aliases);
     if (raw !== undefined) where.push(filterClause(column, column, raw));
   }
@@ -619,6 +620,60 @@ async function handleDispatch(env: Env, params: URLSearchParams): Promise<Respon
   const series = [...byRegion.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([region, s]) => ({ region, ...s }));
+
+  return json({
+    start: window.start ?? null,
+    end: window.end ?? null,
+    resolution,
+    truncated: results.length === limit,
+    timestamps,
+    series,
+  });
+}
+
+/**
+ * GET /api/v2/rooftop (LAB-1701): per-region rooftop PV generation from
+ * AEMO's ROOFTOP_PV/ACTUAL MEASUREMENT estimate, bucketed with the same
+ * window/resolution grammar as `values`. Same shape and constraints as
+ * `dispatch` (region IS the series, no group_by, no sort), same raw-rows
+ * rationale (~240 rows/day — no rollups needed).
+ *
+ * The source is 30-minute, so buckets exist only where an estimate does:
+ * at resolution 300 rows land solely on half-hour boundaries (the response
+ * is NOT dense at 300 — consumers get the native half-hour axis), and the
+ * most recent ~30-60 minutes have no bucket at all until AEMO publishes the
+ * interval. Absent buckets are absent/null, never zero and never
+ * interpolated — this is an ESTIMATE feed, not SCADA telemetry, and the API
+ * must not manufacture readings the estimator has not produced.
+ */
+async function handleRooftop(env: Env, params: URLSearchParams): Promise<Response> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const window = resolveTimeWindow(params, nowSeconds);
+  const resolution = resolveResolution(params, window, nowSeconds);
+  const { limit, offset } = resolveLimit(params);
+
+  const where = timeClauses(window, 'interval_time');
+  for (const { column, aliases } of REGION_FILTERS) {
+    const raw = firstParam(params, aliases);
+    if (raw !== undefined) where.push(filterClause(column, column, raw));
+  }
+
+  const sql =
+    `SELECT ${bucketExpr('interval_time', resolution)} AS bucket, region, ` +
+    'ROUND(AVG(power), 4) AS value ' +
+    'FROM rooftop_pv ' +
+    `WHERE ${where.map((c) => c.sql).join(' AND ')} ` +
+    'GROUP BY bucket, region ORDER BY bucket ASC, region ASC LIMIT ? OFFSET ?';
+  const binds = [...where.flatMap((c) => c.binds), limit, offset];
+
+  const { results } = await env.DB.prepare(sql)
+    .bind(...binds)
+    .all<{ bucket: number; region: string; value: number }>();
+
+  const { timestamps, byKey } = pivot(results.map((r) => ({ bucket: r.bucket, key: r.region, value: r.value })));
+  const series = [...byKey.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([region, power]) => ({ region, power }));
 
   return json({
     start: window.start ?? null,
@@ -886,6 +941,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         return await handleAggregate(env, url.searchParams);
       case '/api/v2/dispatch':
         return await handleDispatch(env, url.searchParams);
+      case '/api/v2/rooftop':
+        return await handleRooftop(env, url.searchParams);
       case '/api/v2/generators':
         return await handleGenerators(env, url.searchParams);
       case '/api/v2/intensity':
@@ -894,7 +951,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         return jsonError(
           404,
           'unknown route: available are /api/v2/values, /api/v2/values/aggregate, ' +
-            '/api/v2/dispatch, /api/v2/generators, /api/v2/intensity',
+            '/api/v2/dispatch, /api/v2/rooftop, /api/v2/generators, /api/v2/intensity',
         );
     }
   } catch (err) {

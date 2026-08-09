@@ -10,7 +10,8 @@ the weekly out-of-band generator-registration refresh from AEMO's live workbook.
 ## Query API (v2) — public
 
 `src/api.ts` — `GET /api/v2/values`, `GET /api/v2/values/aggregate?group_by=fuel|tech|region`,
-`GET /api/v2/generators`, and `GET /api/v2/intensity`, serving from D1. A **greenfields public
+`GET /api/v2/dispatch`, `GET /api/v2/rooftop`, `GET /api/v2/generators`, and
+`GET /api/v2/intensity`, serving from D1. A **greenfields public
 contract** (public until abuse is detected — ray, 2026-07-24; the legacy 2015
 API is reference-only): columnar lib-agnostic payload, period-ending NEM-time
 buckets (AEST, daily buckets end at AEST midnight), net-MW aggregate
