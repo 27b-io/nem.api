@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NEM power stations — map, live output and emissions</title>
+  <meta name="description" content="Every power station dispatching into Australia's National Electricity Market, pinned by fuel and capacity. Click one for its live output and estimated emissions.">
+  <script>
+    // Theme boot before first paint: explicit choice wins, else OS preference.
+    // Byte-identical to index.html — both pages share the localStorage key.
+    (() => {
+      const param = new URLSearchParams(location.search).get('theme');
+      const saved = localStorage.getItem('theme');
+      const pick = [param, saved].find((t) => t === 'light' || t === 'dark');
+      document.documentElement.dataset.theme =
+        pick ?? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    })();
+  </script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%23eda100' d='M9 1 3 9h4l-1 6 6-8H8l1-6z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/map.css">
+</head>
+<body class="min-h-screen bg-base-200 text-base-content">
+  <header class="border-b border-base-300 bg-base-100">
+    <div class="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3">
+      <h1 class="text-lg font-bold tracking-tight">
+        NEM <span class="font-normal text-base-content/70">power stations</span>
+      </h1>
+      <a class="link text-sm" href="/">Fuel mix &rarr;</a>
+      <div class="ms-auto">
+        <label class="btn btn-ghost btn-sm swap swap-rotate">
+          <input type="checkbox" id="theme-toggle" aria-label="Toggle dark mode">
+          <span class="swap-off" aria-hidden="true">&#9788;</span>
+          <span class="swap-on" aria-hidden="true">&#9789;</span>
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-6xl space-y-4 p-4">
+    <div class="flex flex-wrap items-center gap-x-6 gap-y-3">
+      <nav class="flex flex-wrap items-center gap-3" aria-label="Region filter">
+        <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Region</span>
+        <div class="join" id="region-filter" role="group"></div>
+      </nav>
+      <!-- Keyboard/AT path to every station: 450-odd tabbable circles would be
+           hostile, a select is one stop and reaches all of them. -->
+      <label class="flex items-center gap-3 text-sm">
+        <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Station</span>
+        <select class="select station-picker" id="station-select" aria-label="Select a power station"></select>
+      </label>
+    </div>
+
+    <div class="alert alert-error hidden text-sm" id="error-alert" role="alert">
+      <span id="error-text"></span>
+      <button class="btn btn-ghost btn-xs" id="error-retry">Retry</button>
+    </div>
+
+    <div class="map-layout">
+      <section class="card chart-surface rounded-lg border border-base-300 shadow-sm">
+        <div class="card-body gap-4 p-4 sm:p-6">
+          <div class="flex flex-wrap items-baseline gap-x-6 gap-y-1">
+            <div>
+              <p class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Stations pinned</p>
+              <p class="text-4xl font-semibold sm:text-5xl" id="station-count">&mdash;</p>
+            </div>
+            <p class="text-sm text-base-content/60" id="coverage-note"></p>
+          </div>
+
+          <div id="map-wrap">
+            <svg id="map" role="img" aria-label="Map of power stations in the National Electricity Market"></svg>
+            <button class="btn btn-ghost btn-xs" id="reset-view" type="button">Reset view</button>
+          </div>
+
+          <div id="legend" class="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs"></div>
+
+          <p class="text-xs text-base-content/60">
+            Every dispatching unit in AEMO&rsquo;s registration list that we can place, grouped
+            into the station it belongs to. Marker colour is the station&rsquo;s largest fuel by
+            registered capacity &mdash; the same palette as the fuel-mix chart; marker area
+            scales with registered capacity, so a 2&nbsp;GW station covers a hundred times the
+            area of a 20&nbsp;MW one rather than a hundred times the width. Drag to pan;
+            <kbd>ctrl</kbd>/<kbd>&#8984;</kbd>&#8202;+&#8202;scroll to zoom, or pick a region
+            above. Grey jurisdictions (WA, NT) are separate grids and structurally outside
+            the NEM.
+          </p>
+          <p class="text-xs text-base-content/60">
+            <strong class="font-semibold">A NEM region is electrical, not geographic.</strong>
+            Snowy&rsquo;s Murray Power Station sits in New South Wales but dispatches into
+            <code>VIC1</code>, so filtering to Victoria pins it where it physically stands
+            &mdash; on the wrong side of the border. Pins are the station&rsquo;s real
+            coordinates; regions are AEMO&rsquo;s. Coastlines are drawn at 1:50&nbsp;million, so a
+            station on a headland or a border can sit a whisker outside the outline.
+          </p>
+        </div>
+      </section>
+
+      <aside class="card chart-surface rounded-lg border border-base-300 shadow-sm" id="panel"
+             aria-live="polite" aria-label="Station detail">
+        <div class="card-body gap-4 p-4 sm:p-6" id="panel-body">
+          <p class="text-sm text-base-content/60">Pick a station on the map for its details, live output and emissions profile.</p>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <footer class="mx-auto max-w-6xl px-4 pb-6 text-xs text-base-content/50">
+    Dispatch and emissions data &copy; AEMO, via NEMWEB &middot;
+    Facility locations &copy; <a class="link" href="https://openelectricity.org.au/">Open Electricity</a>
+    (<a class="link" href="https://creativecommons.org/licenses/by-nc/4.0/">CC BY-NC 4.0</a>) &middot;
+    Boundaries from <a class="link" href="https://www.naturalearthdata.com/">Natural Earth</a> (public domain) &middot;
+    <a class="link" href="https://github.com/27b-io/nem.api/blob/master/worker/API.md">API contract</a>
+  </footer>
+
+  <script type="module" src="/map.js"></script>
+</body>
+</html>

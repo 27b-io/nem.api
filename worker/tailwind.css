@@ -2,7 +2,34 @@
    Output (public/assets/styles.css) is committed, like the generated seed
    migration, so deploy stays a plain `wrangler deploy`. */
 @import "tailwindcss" source(none);
-@source "./public";
+
+/* The scan list is the fuel-mix chart page and nothing else — it is an
+   ALLOW-LIST on purpose, not a directory scan.
+   public/assets/styles.css is downloaded by every page here, so a bare
+   `@source "./public"` means a class used only on the station map still grows
+   the bytes the chart page pays for (LAB-1702 measured +9 kB before this
+   change: daisyUI's .list/.input/.hero pulled in by nothing more than the word
+   "ring" appearing in a loop variable). The map page brings its own
+   hand-written public/assets/map.css and reuses only the daisyUI components
+   this list already emits.
+   TWO RULES FALL OUT OF THIS, both silent if broken:
+   1. ADDING A FILE TO THE CHART PAGE MEANS ADDING IT HERE, or its classes go
+      missing at runtime with no build error.
+   2. public/map.html and public/map.js are deliberately NOT scanned, so they
+      may use only classes this list already emits — every other map-only rule
+      belongs in public/assets/map.css. Deleting a class from index.html can
+      therefore unstyle the map page while CI stays green.
+   `npm run check:classes` enforces rule 2 and runs in CI.
+
+   Also worth knowing: the scanner reads PROSE, not just markup. A comment in a
+   scanned file containing the bare word "grow" emits `.grow{flex-grow:1}`. If
+   the stylesheet grows by a few bytes for no visible reason, that is why. */
+@source "./public/index.html";
+@source "./public/app.js";
+@source "./public/chrome.js";
+@source "./public/stacking.js";
+@source "./public/overlays.js";
+@source "./public/ranges.js";
 
 @plugin "daisyui" {
   themes: light --default, dark --prefersdark;

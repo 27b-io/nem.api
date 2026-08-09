@@ -403,7 +403,7 @@ describe('compression — ByteStorage envelope', () => {
   });
 
   it('survives a pre-flip plain entry — the error storm the KEY_VERSION bump avoids', async () => {
-    // What a k3 entry does to the k4 reader, end to end. unpack cannot read
+    // What a plain (pre-k5) entry does to the k5 reader, end to end. unpack cannot read
     // bare MessagePack and createCache.minimal disables degradation, so the
     // get THROWS rather than returning null — handleApiCached's own catch is
     // what keeps the endpoint up, and the refill overwrites the entry. The

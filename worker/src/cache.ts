@@ -80,20 +80,29 @@ export const GENERATORS_TTL_SECONDS = 3600;
 // k3: LAB-1721 routed `values` at 3600/86400 to the same rollups (full-bucket
 // edge semantics) and changed its TTL policy to match — pre-cutover `values`
 // entries at those resolutions must not survive either.
-// k4: LAB-1765 turned compression on, which changes the STORED BYTES, not just
+// k4: LAB-1702 added `emissions_factor` to every `generators` row. Those
+// entries live an hour and deploy purges nothing, so without a bump the
+// station map would spend up to an hour telling every visitor that AEMO
+// publishes no emission factor for any station — a field missing from an old
+// entry and a published `null` are indistinguishable to the consumer's
+// `== null` check (a numeric 0 is a real published factor and unaffected).
+// k5: LAB-1765 turned compression on, which changes the STORED BYTES, not just
 // the shape: entries are now a ByteStorage envelope (LZ4 + xxHash3-64) instead
-// of bare MessagePack. The envelope reader cannot decode a k3 entry, and
+// of bare MessagePack. (Originally numbered k4 on this branch; renumbered on
+// merge because master's LAB-1702 bump took k4 first — its entries are live
+// and uncompressed, so the compressed reader must not share their version.)
+// The envelope reader cannot decode a plain k4 entry, and
 // createCache.minimal sets degradation:false, so the get THROWS — survivable
 // (handleApiCached catches, logs and serves from D1, and the refill overwrites
 // the entry) but it would fire once per live key across the whole deploy. A
 // version bump buys the same refill at the same cost without the error storm.
 // A REVERT needs a bump too, and for a worse reason: the envelope is itself
-// valid positional MessagePack, so a compression-off reader DECODES a k4 entry
+// valid positional MessagePack, so a compression-off reader DECODES a k5 entry
 // successfully and hands the envelope tuple back as the value — not a miss
 // (cachekit-ts finding, LAB-1388; the tolerant read path that fixes it is
 // merged upstream but unreleased as of 0.1.5). That is what isCachedResponse()
 // catches: without it, the tuple's absent `body` was served as an empty 200.
-const KEY_VERSION = 'k4';
+const KEY_VERSION = 'k5';
 
 /**
  * Seconds until this entry must expire so it never outlives the data:

@@ -455,10 +455,24 @@ Accepts the generator filters above; no time/limit params.
     "participant_name": "AGL Hydro Partnership", "duid": "BAPS",
     "state": "VIC1", "technology_type": "Renewable",
     "technology_description": "Hydro - Gravity", "fuel_type": "Hydro",
-    "fuel_description": "Water", "reg_cap": 12.85, "max_cap": 13
+    "fuel_description": "Water", "reg_cap": 12.85, "max_cap": 13,
+    "emissions_factor": null
   }
 ]
 ```
+
+`emissions_factor` is AEMO's published CDEII emission factor for that DUID in
+**tCO₂-e per MWh sent out** — the same table `/api/v2/intensity` computes from,
+joined on DUID with no name matching. It is `null` when AEMO publishes no
+factor for the unit (~2% of dispatching capacity: a handful of pumped- and
+small-hydro units) and, before the first CDEII refresh has run, for every unit.
+
+**`null` is not zero.** A unit with no published factor is one we know nothing
+about, not one that emits nothing — `/api/v2/intensity` excludes such units
+from both halves of its ratio and discloses the shortfall in `coverage`, and a
+consumer multiplying MW by this field must do the same. Because the factors are
+*sent out* and dispatch SCADA is *as-generated*, any rate derived this way reads
+a few percent high; see the intensity section for the full caveat.
 
 ## Deliberately absent (greenfields decisions, 2026-07-24)
 
