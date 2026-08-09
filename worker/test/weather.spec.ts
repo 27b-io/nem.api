@@ -9,8 +9,7 @@ describe('weatherEndpoint', () => {
   const nowMs = Date.UTC(2026, 7, 9, 3, 0, 0); // 2026-08-09T03:00:00Z
 
   it('picks the Forecast API for ranges within past_days=92, region coords included', () => {
-    const { source, url } = weatherEndpoint('24h', 'NSW1', nowMs);
-    expect(source).toBe('forecast');
+    const url = weatherEndpoint('24h', 'NSW1', nowMs);
     const params = new URL(url).searchParams;
     expect(url.startsWith('https://api.open-meteo.com/v1/forecast?')).toBe(true);
     expect(params.get('latitude')).toBe('-33.8688');
@@ -24,13 +23,13 @@ describe('weatherEndpoint', () => {
   });
 
   it('scales past_days with the requested range, still under the Forecast API cap', () => {
-    expect(new URL(weatherEndpoint('30d', 'NSW1', nowMs).url).searchParams.get('past_days')).toBe('30');
-    expect(weatherEndpoint('30d', 'NSW1', nowMs).source).toBe('forecast');
+    const url = weatherEndpoint('30d', 'NSW1', nowMs);
+    expect(url.startsWith('https://api.open-meteo.com/v1/forecast?')).toBe(true);
+    expect(new URL(url).searchParams.get('past_days')).toBe('30');
   });
 
   it('switches to the Historical (archive) API once the window exceeds 92 days', () => {
-    const { source, url } = weatherEndpoint('1y', 'NSW1', nowMs);
-    expect(source).toBe('historical');
+    const url = weatherEndpoint('1y', 'NSW1', nowMs);
     const params = new URL(url).searchParams;
     expect(url.startsWith('https://archive-api.open-meteo.com/v1/archive?')).toBe(true);
     expect(params.has('past_days')).toBe(false);
@@ -39,8 +38,8 @@ describe('weatherEndpoint', () => {
   });
 
   it('NEM-wide region ("") and an unknown region both fall back to the NSW1 reference point', () => {
-    const nemWide = new URL(weatherEndpoint('24h', '', nowMs).url).searchParams;
-    const unknown = new URL(weatherEndpoint('24h', 'QQQ1', nowMs).url).searchParams;
+    const nemWide = new URL(weatherEndpoint('24h', '', nowMs)).searchParams;
+    const unknown = new URL(weatherEndpoint('24h', 'QQQ1', nowMs)).searchParams;
     for (const params of [nemWide, unknown]) {
       expect(params.get('latitude')).toBe(String(REGION_COORDS.NSW1.lat));
       expect(params.get('longitude')).toBe(String(REGION_COORDS.NSW1.lon));
@@ -48,7 +47,7 @@ describe('weatherEndpoint', () => {
   });
 
   it('falls back to the 24h window for an unknown range key', () => {
-    expect(new URL(weatherEndpoint('bogus', 'NSW1', nowMs).url).searchParams.get('past_days')).toBe('1');
+    expect(new URL(weatherEndpoint('bogus', 'NSW1', nowMs)).searchParams.get('past_days')).toBe('1');
   });
 
   // Request-forgery invariant (Kody, PR #25): whatever region/range are fed
@@ -60,7 +59,7 @@ describe('weatherEndpoint', () => {
     const hostile = ['https://evil.example', '//evil.example/x', '../../etc/passwd', '__proto__', 'constructor'];
     for (const region of hostile) {
       for (const range of hostile) {
-        const url = new URL(weatherEndpoint(range, region, nowMs).url);
+        const url = new URL(weatherEndpoint(range, region, nowMs));
         expect(['api.open-meteo.com', 'archive-api.open-meteo.com']).toContain(url.hostname);
         expect(url.searchParams.get('latitude')).toBe(String(REGION_COORDS.NSW1.lat));
         expect(url.searchParams.get('longitude')).toBe(String(REGION_COORDS.NSW1.lon));
@@ -68,8 +67,9 @@ describe('weatherEndpoint', () => {
     }
   });
 
-  it('has a reference point for every NEM region plus the NEM-wide default', () => {
-    for (const region of ['NSW1', 'QLD1', 'VIC1', 'SA1', 'TAS1', '']) {
+  // The NEM-wide default ('') is covered by the fallback test above.
+  it('has a reference point for every NEM region', () => {
+    for (const region of ['NSW1', 'QLD1', 'VIC1', 'SA1', 'TAS1']) {
       const coords = REGION_COORDS[region];
       expect(coords).toBeDefined();
       expect(Number.isFinite(coords.lat)).toBe(true);
@@ -106,6 +106,39 @@ describe('alignWeather', () => {
     // Bucket ends: H12 covers 11:00-12:00 (not in the payload); H13 covers
     // 12:00-13:00 (10); H13+3600 covers 13:00-14:00 (20).
     expect(alignWeather([H12, H13, H13 + 3600], 3600, weather, 'wind_speed_100m')).toEqual([null, 10, 20]);
+  });
+
+  // Pinned at HOURLY resolution deliberately: at daily resolution both
+  // boundary hours are night-zero, so a convention error washes out of the
+  // mean and the daily test below can never fail on it.
+  it('shortwave_radiation (period-ENDING labels) joins to the bucket ending at its label, not the next one', () => {
+    // Open-Meteo labels radiation at the END of the hour it averages: the
+    // 13:00 entry is the mean over 12:00-13:00 — the same hour the chart
+    // bucket ending 13:00 covers. Treating it as period-starting (the
+    // instantaneous-variable convention) would read the 12:00 entry here and
+    // draw the whole irradiance curve an hour early.
+    const radiation = {
+      hourly: {
+        time: ['2026-08-08T12:00', '2026-08-08T13:00'],
+        shortwave_radiation: [2, 100],
+      },
+    };
+    expect(alignWeather([H13], 3600, radiation, 'shortwave_radiation')).toEqual([100]);
+    // Sub-hour buckets inside 12:00-13:00 read that hour's (period-ending) entry.
+    expect(alignWeather([H12 + 300, H13], 300, radiation, 'shortwave_radiation')).toEqual([100, 100]);
+  });
+
+  it('rejects non-numeric values from the untrusted payload instead of coercing them', () => {
+    // '5' + 0 concatenates, not adds — a string that slipped into a mean
+    // would yield a plausible-looking wrong number, and an object would put
+    // the literal string "NaN" on the page. Both must stay null/absent.
+    const hostile = {
+      hourly: {
+        time: ['2026-08-08T12:00', '2026-08-08T13:00'],
+        wind_speed_100m: ['5', { v: 7 }],
+      },
+    };
+    expect(alignWeather([H13, H13 + 3600], 3600, hostile, 'wind_speed_100m')).toEqual([null, null]);
   });
 
   it('daily buckets average every hourly reading they cover, nulls excluded from the mean', () => {

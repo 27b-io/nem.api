@@ -23,9 +23,10 @@ export const $ = (id) => document.getElementById(id);
 
 /** Fetch JSON, surfacing the API's own `{ error }` message when it sends one.
  *  The URL rides along in the message because both pages fan several fetches
- *  into one Promise.all, where a bare "HTTP 404" names nothing. */
-export async function fetchJson(url) {
-  const res = await fetch(url);
+ *  into one Promise.all, where a bare "HTTP 404" names nothing. `init` passes
+ *  through to fetch() — third-party callers use it for an abort deadline. */
+export async function fetchJson(url, init) {
+  const res = await fetch(url, init);
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }

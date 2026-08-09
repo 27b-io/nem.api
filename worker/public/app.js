@@ -79,17 +79,29 @@ const state = {
    * fetches every variable (wind/temperature/irradiance) together, so
    * switching which is drawn is a pure re-render, like the intensity toggle —
    * only turning it on from off, or a region/range change, needs a fetch.
-   * weatherFailed drives the non-blocking notice (never the big fuel-mix
-   * error banner: an Open-Meteo outage must not read as OUR data being down). */
+   * weatherKey stamps which region|range the payload in `weather` answers, so
+   * a payload stranded by a failed load() can never be drawn against a newer
+   * selection. `weatherVarDef` is the resolved WEATHER_VARS entry, derived
+   * once per render like intensityInk (renderReadout runs per mousemove).
+   * Failure state is DERIVED (weatherFailed() below), never stored — a
+   * stored flag was wrong in both directions when toggles landed mid-load. */
   weatherVar: null,
   weather: null,
+  weatherKey: '',
   weatherAligned: null,
-  weatherFailed: false,
+  weatherVarDef: null,
 };
 
 /** Price needs a single region — the NEM has no NEM-wide spot price. */
 const priceDrawable = () => state.overlays.price && state.region !== '';
 const overlaysWanted = () => state.overlays.price || state.overlays.demand;
+
+/** The selection the current weather payload would have to answer. */
+const weatherKey = () => `${state.region}|${state.range}`;
+/* Derived, not stored: a variable is selected but no payload is in hand.
+ * True while a fetch is in flight too, but the notice only paints when
+ * updateWeatherUi runs — which is always after the fetch settles. */
+const weatherFailed = () => state.weatherVar !== null && state.weather === null;
 
 /* Carbon intensity (LAB-1698) for the selected region, aligned to the fuel
  * payload's buckets by TIMESTAMP rather than by index: both endpoints are
@@ -215,6 +227,7 @@ function renderChart() {
   // all-null array, which is what lets the readout show "—" instead of
   // nothing at all.
   const weatherVar = WEATHER_VARS.find((v) => v.key === state.weatherVar) ?? null;
+  state.weatherVarDef = weatherVar;
   state.weatherAligned = weatherVar
     ? alignWeather(state.payload.timestamps, state.payload.resolution, state.weather, weatherVar.key)
     : null;
@@ -386,8 +399,7 @@ function renderReadout(cursorIdx) {
   // without color. Weather only needs state.weatherAligned (set whenever a
   // variable is selected, even mid-fetch or after a failure — a null entry
   // there just reads "—", same as any other gap).
-  const showWeather = state.weatherAligned !== null;
-  if ((state.aligned && (state.overlays.demand || priceDrawable())) || showWeather) {
+  if ((state.aligned && (state.overlays.demand || priceDrawable())) || state.weatherAligned) {
     const overlays = state.aligned;
     const theme = currentTheme();
     const addOverlayRow = (ink, label, text) => {
@@ -417,8 +429,8 @@ function renderReadout(cursorIdx) {
       const v = overlays.demand[idx];
       addOverlayRow(OVERLAY_INKS.demand[theme], 'Demand (MW)', v == null ? '—' : fmtMW.format(v));
     }
-    if (showWeather) {
-      const wv = WEATHER_VARS.find((v) => v.key === state.weatherVar);
+    if (state.weatherAligned) {
+      const wv = state.weatherVarDef; // resolved in renderChart, not per mousemove
       const v = state.weatherAligned[idx];
       addOverlayRow(WEATHER_INK[theme], `${wv.label} (${wv.unit})`, v == null ? '—' : v.toFixed(wv.decimals));
     }
@@ -534,7 +546,12 @@ const fetchDispatch = (range) => fetchJson(`/api/v2/dispatch?${rangeQuery(range)
 // worker proxy, keyless, CORS-open. One request carries every variable, so a
 // region/range change is the only thing that needs a refetch; switching
 // which variable is drawn is a pure re-render (see initWeatherOverlay).
-const fetchWeather = (region, range) => fetchJson(weatherEndpoint(range, region, Date.now()).url);
+// The abort deadline is what keeps the isolation promise: .catch() isolates
+// REJECTION, but a blackholed third-party origin that never settles would
+// hang the load()'s Promise.all — and the fuel-mix chart with it. Our own
+// API fetches carry no deadline; only the origin we don't operate gets one.
+const fetchWeather = (range, region) =>
+  fetchJson(weatherEndpoint(range, region, Date.now()), { signal: AbortSignal.timeout(8000) });
 
 // Monotonic token so a slow, stale region response can never overwrite the
 // latest selection (or clear a newer request's busy state).
@@ -586,7 +603,7 @@ async function load(region, range) {
       // Weather (LAB-1699), region-specific unlike the others above — a
       // region switch while the overlay is on refetches under this loadId.
       wantedWeather
-        ? fetchWeather(region, range).catch((err) => { console.error('weather overlay refresh failed:', err); return null; })
+        ? fetchWeather(range, region).catch((err) => { console.error('weather overlay refresh failed:', err); return null; })
         : Promise.resolve(null),
     ]);
     if (loadId !== activeLoad) return;
@@ -598,11 +615,12 @@ async function load(region, range) {
     // any stale payload). An overlay toggled ON mid-flight fetches under this
     // same loadId; its result must not be clobbered by our null placeholder.
     if (wantedDispatch || !overlaysWanted()) state.dispatch = dispatch;
-    if (wantedWeather || state.weatherVar === null) state.weather = weather;
-    state.weatherFailed = wantedWeather && weather === null;
+    if (wantedWeather || state.weatherVar === null) {
+      state.weather = weather;
+      state.weatherKey = weatherKey();
+    }
     $('error-alert').classList.add('hidden');
     render();
-    updateWeatherUi();
   } catch (err) {
     if (loadId !== activeLoad) return;
     console.error('fuel-mix load failed:', err);
@@ -611,6 +629,9 @@ async function load(region, range) {
     if (loadId === activeLoad) {
       chartEl.classList.remove('opacity-50');
       chartEl.removeAttribute('aria-busy');
+      // In finally, not the success arm: a failed load must still clear a
+      // stale "weather unavailable" notice sitting beside the big banner.
+      updateWeatherUi();
     }
   }
 }
@@ -702,9 +723,8 @@ function initOverlays() {
 // The CC-BY attribution appears whenever the overlay has been switched on,
 // regardless of whether this particular fetch succeeded.
 function updateWeatherUi() {
-  const on = state.weatherVar !== null;
-  $('weather-note').classList.toggle('hidden', !state.weatherFailed);
-  $('weather-attribution').classList.toggle('hidden', !on);
+  $('weather-note').classList.toggle('hidden', !weatherFailed());
+  $('weather-attribution').classList.toggle('hidden', state.weatherVar === null);
 }
 
 function initWeatherOverlay() {
@@ -715,20 +735,24 @@ function initWeatherOverlay() {
 
   select.addEventListener('change', async () => {
     state.weatherVar = select.value || null;
-    state.weatherFailed = false;
-    if (state.weatherVar && !state.weather) {
+    // Refetch when there is no payload OR the one in hand answers a different
+    // region|range — a payload stranded by a failed load() (its catch skips
+    // the weather assignment while the selection has already committed) must
+    // not be drawn against the newer selection. On failure the selection
+    // stays put (still "Wind speed", say) and weatherFailed() drives the
+    // notice — the notice replaces the drawn line, not the choice, so the
+    // next load() retries automatically instead of silently falling to off.
+    if (state.weatherVar && (!state.weather || state.weatherKey !== weatherKey())) {
       const loadId = activeLoad; // bail if a region/range switch lands mid-fetch
       try {
-        const weather = await fetchWeather(state.region, state.range);
+        const weather = await fetchWeather(state.range, state.region);
         if (loadId !== activeLoad) return;
         state.weather = weather;
+        state.weatherKey = weatherKey();
       } catch (err) {
         console.error('weather overlay load failed:', err);
         if (loadId !== activeLoad) return;
-        // Selection stays put (still "Wind speed", say) — the notice replaces
-        // the drawn line, not the choice, so the next load() retries it
-        // automatically instead of silently falling back to off.
-        state.weatherFailed = true;
+        state.weather = null;
       }
     }
     updateWeatherUi();
