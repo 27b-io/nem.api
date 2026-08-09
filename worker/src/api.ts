@@ -912,9 +912,17 @@ async function handleGenerators(env: Env, params: URLSearchParams): Promise<Resp
   const where = filters.length > 0 ? ` WHERE ${filters.map((f) => f.sql).join(' AND ')}` : '';
   // Explicit projection, not SELECT * — the response shape is pinned in
   // API.md; future schema columns must not drift (or leak) into it silently.
+  //
+  // emissions_factor is a correlated subquery rather than a LEFT JOIN because
+  // generatorFilters emits UNQUALIFIED column names (they are also spliced
+  // into an `IN (SELECT id FROM generators WHERE …)` subquery elsewhere), and
+  // `duid` exists on both tables — a join would turn every `?duid=` filter
+  // into an ambiguous-column error. emission_factors is a WITHOUT ROWID table
+  // keyed on duid, so this is a point lookup per row.
   const { results } = await env.DB.prepare(
     'SELECT id, name, participant_name, duid, state, technology_type, ' +
-      'technology_description, fuel_type, fuel_description, reg_cap, max_cap ' +
+      'technology_description, fuel_type, fuel_description, reg_cap, max_cap, ' +
+      '(SELECT factor FROM emission_factors ef WHERE ef.duid = generators.duid) AS emissions_factor ' +
       `FROM generators${where} ORDER BY id`,
   )
     .bind(...filters.flatMap((f) => f.binds))

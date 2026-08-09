@@ -42,6 +42,12 @@ jobs:
           git diff --exit-code -- migrations/0002_seed_generators.sql
       - name: Verify registration-refresh mapping (captured sheet sample)
         run: npm run refresh:check
+      - name: Verify station-geodata join (captured facility-dump sample)
+        run: npm run facilities:check
+      - name: Verify built stylesheet is committed and current
+        run: |
+          npm run build:css
+          git diff --exit-code -- public/assets/styles.css
       - name: Apply local D1 migrations
         run: npm run migrate:local
       - name: Smoke-check local /health
