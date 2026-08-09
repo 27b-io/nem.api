@@ -26,7 +26,14 @@ export const $ = (id) => document.getElementById(id);
  *  into one Promise.all, where a bare "HTTP 404" names nothing. `init` passes
  *  through to fetch() — third-party callers use it for an abort deadline. */
 export async function fetchJson(url, init) {
-  const res = await fetch(url, init);
+  let res;
+  try {
+    res = await fetch(url, init);
+  } catch (err) {
+    // Transport errors (DNS, offline, abort) name no URL on their own, and
+    // the fan-in rationale above applies to them just as much as to a 404.
+    throw new Error(`${url}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }
