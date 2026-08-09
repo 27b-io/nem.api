@@ -387,12 +387,37 @@ so ids are preserved and nothing is deleted.
 
 CD: every push to the default branch (`master`, or `main` if ever renamed) runs
 `.github/workflows/deploy.yml` — typecheck, apply D1 migrations, `wrangler deploy`,
-then smoke-check `/health`. It needs one repo Actions secret:
+then smoke-check `/health`. It needs two repo Actions secrets:
 
 - `CLOUDFLARE_API_TOKEN` — API token scoped to the account, with
   **Workers Scripts: Edit** and **D1: Edit** (Cloudflare dash → My Profile →
   API Tokens → "Edit Cloudflare Workers" template + add D1 Edit). The account id
   is pinned in `wrangler.toml`, so no account permission is needed beyond that.
+- `SMOKE_BYPASS_TOKEN` — shared secret for the smoke check (LAB-1760).
+  Cloudflare's edge bot/IP filtering 403s requests from GitHub-hosted runners
+  before they reach the Worker, so the smoke step sends
+  `X-Smoke-Bypass: <token>` and a WAF custom rule on the 27b.io zone skips the
+  filtering **only** when host is `nem.27b.io`, path is `/health`, and the
+  header equals this secret. Scope the rule's **Skip** action narrowly: first
+  identify the blocking service in zone Security → Events (the `cf-ray` from a
+  failed run log looks it up directly), then tick only that product in the
+  rule's "WAF components to skip" — do not select "All remaining custom rules"
+  or products that aren't doing the blocking. Beware that the "All managed
+  rules" component is not per-product: ticking it skips the entire WAF
+  Managed Rules phase for matching requests. If the blocker is a managed
+  rule, leave it unticked and instead add a WAF exception (zone Security →
+  WAF → Managed rules → Add exception) that skips only the specific rule or
+  ruleset, matching the same host/path/header expression.
+  Place it above any custom rule
+  that could match this request — a Skip does not suppress custom rules listed
+  after it unless "All remaining custom rules" is ticked (which it must not
+  be). All unrelated WAF, rate-limiting, and custom rules stay enabled,
+  including for `/health`.
+  Rotate by generating a new random value and updating the WAF rule and this
+  secret together. If the smoke step starts 403ing again, check zone
+  Security → Events for the blocking service — a block by (classic) Bot Fight
+  Mode cannot be skipped by custom rules; only Super Bot Fight Mode /
+  Bot Management rules can.
 
 Manual deploy still works:
 
