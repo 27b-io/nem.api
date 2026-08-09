@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, assert, describe, expect, it, vi } from 'vitest';
 import { fetchJson } from '../public/chrome';
 
 // fetchJson's contract is "throws, with the URL in the message" — both pages
@@ -13,10 +13,10 @@ describe('fetchJson', () => {
     const boom = new TypeError('Failed to fetch');
     vi.stubGlobal('fetch', () => Promise.reject(boom));
     const err = await fetchJson('https://api.open-meteo.com/v1/forecast?x=1').catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toContain('https://api.open-meteo.com/v1/forecast?x=1');
-    expect((err as Error).message).toContain('Failed to fetch');
-    expect((err as Error).cause).toBe(boom);
+    assert(err instanceof Error, `expected an Error, got ${String(err)}`);
+    expect(err.message).toContain('https://api.open-meteo.com/v1/forecast?x=1');
+    expect(err.message).toContain('Failed to fetch');
+    expect(err.cause).toBe(boom);
   });
 
   it('still surfaces the API error body with the URL on non-ok responses', async () => {
@@ -24,6 +24,7 @@ describe('fetchJson', () => {
       Promise.resolve(new Response(JSON.stringify({ error: 'no such range' }), { status: 400 })),
     );
     const err = await fetchJson('/api/v2/values?range=bogus').catch((e: unknown) => e);
-    expect((err as Error).message).toBe('/api/v2/values?range=bogus: no such range');
+    assert(err instanceof Error, `expected an Error, got ${String(err)}`);
+    expect(err.message).toBe('/api/v2/values?range=bogus: no such range');
   });
 });
