@@ -90,14 +90,18 @@ export function buildSnapshot(data) {
 
   const claim = (index, duid, kind) => {
     const held = owner.get(duid);
-    if (held && held.index !== index) {
-      conflicts.push({
-        duid,
-        kind,
-        facility: facilities[index].code,
-        heldBy: facilities[held.index].code,
-        heldKind: held.kind,
-      });
+    if (held) {
+      // First claim wins even within one facility: the exact pass runs before
+      // the alias pass, so an alias must never downgrade an exact `kind`.
+      if (held.index !== index) {
+        conflicts.push({
+          duid,
+          kind,
+          facility: facilities[index].code,
+          heldBy: facilities[held.index].code,
+          heldKind: held.kind,
+        });
+      }
       return;
     }
     owner.set(duid, { index, kind });

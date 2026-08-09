@@ -46,14 +46,23 @@ const MIN_FACILITIES = 400;
 
 const arg = (name) => {
   const i = process.argv.indexOf(name);
-  return i === -1 ? null : process.argv[i + 1];
+  if (i === -1) return null;
+  // A typed flag missing its value must abort — falling through to `undefined`
+  // would silently switch the build to network mode and overwrite the snapshot.
+  const value = process.argv[i + 1];
+  assert.ok(value && !value.startsWith('--'), `${name} needs a file path`);
+  return value;
 };
 
 async function loadJson(url, file) {
   if (file) return JSON.parse(readFileSync(file, 'utf8'));
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(60_000) }).catch((err) => {
+    throw new Error(`fetching ${url}: ${err.message} — facilities.json left untouched`, { cause: err });
+  });
   assert.ok(res.ok, `HTTP ${res.status} fetching ${url} — facilities.json left untouched`);
-  return res.json();
+  return res.json().catch((err) => {
+    throw new Error(`parsing JSON from ${url}: ${err.message}`, { cause: err });
+  });
 }
 
 // --- self-check: the pure core against a captured slice of the live dump -----
@@ -143,6 +152,9 @@ console.log(`Wrote public/facilities.json — ${facilities.length} NEM facilitie
 const generators = await loadJson(GENERATORS_URL, arg('--generators'));
 const { stations, unmatched, regionMismatch } = joinStations({ facilities }, generators);
 const joinable = generators.filter((g) => g.duid && g.duid !== '-').length;
+// The coverage report is the point of the run — an empty or reshaped
+// generators payload would print NaN% on every line, which reads as success.
+assert.ok(joinable > 0, 'no joinable DUIDs in the generators payload — coverage report would be meaningless');
 const pct = (n) => `${((n / joinable) * 100).toFixed(1)}%`;
 
 console.log(`\nJoin coverage vs /api/v2/generators (${joinable} DUIDs):`);

@@ -10,27 +10,42 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
+const read = (p) => {
+  try {
+    return readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
+  } catch (err) {
+    throw new Error(`check:classes cannot read ${p}: ${err.message}`, { cause: err });
+  }
+};
 
 // The unscanned page, and the two stylesheets it is allowed to draw from.
 const SOURCES = ['public/map.html', 'public/map.js'];
 const STYLESHEETS = ['public/assets/styles.css', 'public/assets/map.css'];
 
-/** Class tokens from `class="…"` attributes and `class: '…'` element props. */
+/** Every static class token: `class="…"` attributes, `class: '…'` element
+ *  props (including every literal branch inside a template interpolation),
+ *  `setAttribute('class', …)` values, and classList calls. Dynamic
+ *  expressions are ignored — only string literals can be checked. */
 function classesIn(text) {
   const found = new Set();
-  for (const [, value] of text.matchAll(/class="([^"]+)"/g)) {
+  const add = (value) => {
     for (const token of value.split(/\s+/)) if (token) found.add(token);
+  };
+  for (const [, value] of text.matchAll(/class="([^"]+)"/g)) add(value);
+  for (const [, value] of text.matchAll(/class:\s*['"]([^'"]*)/g)) add(value);
+  // class: `a b${x ? ' c' : ''}` — the literal segments between
+  // interpolations, plus every quoted fragment inside them (' c').
+  for (const [, tpl] of text.matchAll(/class:\s*`([^`]*)`/g)) {
+    add(tpl.replace(/\$\{[^}]*\}/g, ' '));
+    for (const [, expr] of tpl.matchAll(/\$\{([^}]*)\}/g)) {
+      for (const [, frag] of expr.matchAll(/["']([^"']*)["']/g)) add(frag);
+    }
   }
-  // el(tag, { class: 'a b' }) and `class: \`a b${x ? ' c' : ''}\``: take the
-  // literal head of the string; an interpolated tail is checked on its own by
-  // the `' c'` fragment rule below.
-  for (const [, value] of text.matchAll(/class:\s*[`'"]([^`'"${]*)/g)) {
-    for (const token of value.split(/\s+/)) if (token) found.add(token);
+  // setAttribute('class', 'a') and setAttribute('class', cond ? 'a' : 'a b')
+  for (const [, expr] of text.matchAll(/setAttribute\(\s*'class',\s*([^)]+)\)/g)) {
+    for (const [, frag] of expr.matchAll(/["']([^"']*)["']/g)) add(frag);
   }
-  for (const [, value] of text.matchAll(/classList\.(?:add|remove|toggle)\(\s*'([^']+)'/g)) {
-    for (const token of value.split(/\s+/)) if (token) found.add(token);
-  }
+  for (const [, value] of text.matchAll(/classList\.(?:add|remove|toggle)\(\s*'([^']+)'/g)) add(value);
   return found;
 }
 

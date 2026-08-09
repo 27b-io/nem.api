@@ -35,8 +35,15 @@ export async function fetchJson(url) {
 }
 
 export function showError(message) {
-  $('error-text').textContent = message;
-  $('error-alert').classList.remove('hidden');
+  const text = $('error-text');
+  const alert = $('error-alert');
+  if (!text || !alert) {
+    // A page missing the alert markup must not swallow the failure silently.
+    console.error(message);
+    return;
+  }
+  text.textContent = message;
+  alert.classList.remove('hidden');
 }
 
 export function currentTheme() {
@@ -56,6 +63,7 @@ export function installTheme(onChange) {
   const queryTheme = new URLSearchParams(location.search).get('theme');
   const queryExplicit = queryTheme === 'light' || queryTheme === 'dark';
   const toggle = $('theme-toggle');
+  if (!toggle) return; // page ships no toggle — nothing to wire
   toggle.checked = currentTheme() === 'dark';
 
   toggle.addEventListener('change', () => {

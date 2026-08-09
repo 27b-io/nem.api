@@ -79,8 +79,9 @@ export const GENERATORS_TTL_SECONDS = 3600;
 // k4: LAB-1702 added `emissions_factor` to every `generators` row. Those
 // entries live an hour and deploy purges nothing, so without a bump the
 // station map would spend up to an hour telling every visitor that AEMO
-// publishes no emission factor for any station — a missing field and a
-// published zero are indistinguishable to a consumer.
+// publishes no emission factor for any station — a field missing from an old
+// entry and a published `null` are indistinguishable to the consumer's
+// `== null` check (a numeric 0 is a real published factor and unaffected).
 const KEY_VERSION = 'k4';
 
 /**

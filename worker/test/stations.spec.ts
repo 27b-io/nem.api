@@ -102,6 +102,13 @@ describe('buildSnapshot', () => {
     expect(conflicts).toEqual([]);
     expect(duidsOf(facilities[0]).A1).toBe('alias');
   });
+
+  it("keeps an exact claim when the same facility's alias pass re-derives the DUID", () => {
+    // A carries the real DUID A1 AND a synthesised code that aliases to A1.
+    const { facilities, conflicts } = buildSnapshot([facility('A', ['A1', '0AL1'])]);
+    expect(conflicts).toEqual([]);
+    expect(duidsOf(facilities[0]).A1).toBe('exact');
+  });
 });
 
 const snapshot = {

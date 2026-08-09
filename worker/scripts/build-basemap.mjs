@@ -76,9 +76,13 @@ function ringsOf(geometry) {
   return rings;
 }
 
-const res = await fetch(SOURCE_URL);
+const res = await fetch(SOURCE_URL, { signal: AbortSignal.timeout(60_000) }).catch((err) => {
+  throw new Error(`fetching ${SOURCE_URL}: ${err.message} — basemap.json left untouched`, { cause: err });
+});
 assert.ok(res.ok, `HTTP ${res.status} fetching Natural Earth admin-1 — basemap.json left untouched`);
-const { features } = await res.json();
+const { features } = await res.json().catch((err) => {
+  throw new Error(`parsing Natural Earth admin-1 JSON: ${err.message}`, { cause: err });
+});
 
 const out = REGIONS.map(({ id, label, postal }) => {
   const feature = features.find((f) => f.properties.adm0_a3 === 'AUS' && f.properties.postal === postal);
