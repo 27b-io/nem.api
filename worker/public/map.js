@@ -129,9 +129,14 @@ function frame(bounds, aspect) {
  *  which silently offsets every coordinate the pointer produces. So the box is
  *  sized by CSS and the viewBox is fitted to IT, never the other way round. */
 function boxAspect() {
-  const w = Math.max(svg.clientWidth, 320);
-  const h = Math.max(svg.clientHeight, 240);
-  return w / h;
+  // Floors would DEFEAT the point: `height: min(62vh, 34rem)` renders under
+  // 240 px on a viewport shorter than ~387 px (a landscape phone), and a
+  // floored height computes an aspect the element does not have — which is
+  // exactly the letterboxing this function exists to prevent. Only a zero
+  // dimension (no layout yet) gets a fallback, and 4/3 is just something
+  // finite to survive on until the resize listener supplies the truth.
+  const { clientWidth: w, clientHeight: h } = svg;
+  return w > 0 && h > 0 ? w / h : 4 / 3;
 }
 
 function renderBasemap(basemap) {
@@ -210,11 +215,12 @@ function paintMarkers() {
  *  renders about 150 px tall and swallows the continent. Both are converted on
  *  every view change, which is also what keeps a pin a pin at any zoom. */
 function rescaleToScreenPixels() {
-  // Floored at the narrowest real viewport. A zero or near-zero here means the
-  // SVG has no usable layout yet — booted in a background tab, in a hidden
-  // container, or under a headless engine — and dividing by it scales every
-  // marker by most of the viewBox and paints the map solid. The resize
-  // listener corrects the figure the moment real layout happens.
+  // Floored at the narrowest real viewport. Unlike boxAspect() above, a floor
+  // is safe here: this is a per-marker SIZE, not a ratio the viewBox has to
+  // match, so a slightly-too-small pin on a 200 px viewport is cosmetic where a
+  // wrong aspect would misplace every click. A zero means no layout yet
+  // (background tab, hidden container, headless engine) and dividing by it
+  // scales every marker by most of the viewBox and paints the map solid.
   const width = Math.max(svg.clientWidth, 320);
   const k = state.view.w / width;
   for (const marker of state.markers.values()) {
@@ -236,22 +242,25 @@ function clampView(view) {
   return { ...view, x: cx - view.w / 2, y: cy - view.h / 2 };
 }
 
-/** Re-fit the whole-NEM view to the current box, and correct the live view's
- *  aspect so it keeps matching. Runs on resize; a zoomed-in visitor keeps their
- *  centre and width and only the height moves. */
+/** Re-fit the whole-NEM view to the current box and correct the live view's
+ *  aspect so it keeps matching. Runs on resize.
+ *
+ *  The visitor's position is ALWAYS preserved — there is no "they were only
+ *  panned, so recentring is harmless" case. Someone who dragged to Tasmania at
+ *  full zoom-out has a view whose width still equals home's; snapping that back
+ *  to the centred continent on an orientation change throws away the only thing
+ *  they had done. Centre and width survive, only the height follows the new
+ *  aspect, and clampView keeps the result on the map. */
 function reframe() {
-  if (!state.bounds) return;
+  if (!state.bounds || !state.view) return;
   const aspect = boxAspect();
-  const zoomed = state.view && state.view.w < state.home.w - 1e-9;
   state.home = frame(state.bounds, aspect);
-  if (!zoomed) {
-    setView(state.home);
-    return;
-  }
   const cx = state.view.x + state.view.w / 2;
   const cy = state.view.y + state.view.h / 2;
-  const h = state.view.w / aspect;
-  setView(clampView({ x: cx - state.view.w / 2, y: cy - h / 2, w: state.view.w, h }));
+  // A narrower box can make the old width wider than the whole-NEM view.
+  const w = Math.min(state.view.w, state.home.w);
+  const h = w / aspect;
+  setView(clampView({ x: cx - w / 2, y: cy - h / 2, w, h }));
 }
 
 function setView(view) {
@@ -306,8 +315,18 @@ function installPanZoom() {
     zoomBy(Math.exp(event.deltaY * 0.0015), clientToUser(event.clientX, event.clientY));
   }, { passive: false });
 
+  /* Double-click zooms the BASEMAP only.
+   *
+   * Over a marker it does nothing: a pin is a target, and hitting it twice
+   * must not also move the map out from under the panel that just opened.
+   * Kody's suggested fix — setting suppressClick inside this handler — cannot
+   * work: the browser fires click, click, THEN dblclick, so both clicks have
+   * already been delivered by the time this runs and the flag would instead
+   * eat the next unrelated click. The second click is stopped by its own
+   * `detail` below, which is the only signal available while it is in flight. */
   svg.addEventListener('dblclick', (event) => {
     event.preventDefault();
+    if (event.target.classList.contains('marker')) return;
     zoomBy(event.shiftKey ? 2 : 0.5, clientToUser(event.clientX, event.clientY));
   });
 
@@ -365,6 +384,13 @@ function installPanZoom() {
   addEventListener('pointerup', endDrag);
   addEventListener('pointercancel', endDrag);
   svg.addEventListener('click', (event) => {
+    // detail > 1 is the second (or later) click of a multi-click. Letting it
+    // through would re-select the station and fire its 24-hour fetch a second
+    // time for one gesture.
+    if (event.detail > 1) {
+      event.stopPropagation();
+      return;
+    }
     if (!suppressClick) return;
     suppressClick = false;
     event.stopPropagation();

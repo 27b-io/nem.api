@@ -109,8 +109,12 @@ emissions rate at current output. Deep-linkable: `/map?region=SA1&station=TORRB`
 ### Interaction, and how to verify it
 
 Click a pin for its details. Pan by dragging; zoom with the on-map `+` / `−`
-buttons, the scroll wheel (no modifier), or a double-click; the region buttons
-jump straight to a region. The map box is capped at `min(62vh, 34rem)` and the
+buttons, the scroll wheel (no modifier), or a double-click on the basemap
+(shift+double-click zooms out); the region buttons jump straight to a region.
+Double-clicking a *pin* opens the station and does not zoom — a marker is a
+target, and hitting it twice must not move the map out from under the panel that
+just opened. A resize or orientation change keeps the visitor's centre and zoom;
+only the height follows the new aspect. The map box is capped at `min(62vh, 34rem)` and the
 viewBox is fitted to *it* (`boxAspect()`), never the reverse — a viewBox whose
 aspect differs from the box letterboxes under `preserveAspectRatio` and silently
 offsets every pointer coordinate. The cap is also what makes an unmodified wheel
@@ -141,10 +145,7 @@ the Worker does not otherwise carry.
 Shared page chrome (`$`, `fetchJson`, `showError`, `REGIONS`, `TZ`, the theme
 toggle) lives in `public/chrome.js` and is imported by both pages; the theme
 callback is the parameter because the chart repaints a canvas and the map
-recolours SVG fills. Neither page hijacks the scroll: the wheel only zooms with
-ctrl/⌘ held and `touch-action: pan-y` keeps vertical swipes scrolling, because
-the map is taller than most viewports and swallowing the wheel makes the
-attribution in the footer unreachable.
+recolours SVG fills.
 
 **No map library, no tile server.** The basemap is 2100 vertices of vendored
 public-domain geometry rendered as one SVG path per jurisdiction, pan/zoomed by
