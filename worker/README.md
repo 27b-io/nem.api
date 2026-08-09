@@ -214,16 +214,16 @@ coordinate against the polygon of the region AEMO assigns it. On the
 outline. All seven exceptions were measured rather than waved away:
 
 - five sit **0.01–0.19 km** outside (Hume, Musselroe, ADP, Christies Beach,
-  Yarrawonga) — border and coastline generalisation at 1:50 m, sub-pixel at any
+  Yarrawonga) — border and coastline generalisation at 1:50 million, sub-pixel at any
   zoom this map offers;
 - Starfish Hill is 5.2 km out, at the tip of the Fleurieu Peninsula, which
-  1:50 m truncates;
+  1:50 million truncates;
 - **Murray is 11.8 km out, and correctly so.** A NEM region is an *electrical*
   region: Snowy's Murray Power Station stands in New South Wales and dispatches
   into `VIC1`. The pin is geographically right and the region is electrically
   right; they simply disagree, which is why the page says so out loud.
 
-Nothing here needs a finer basemap — 1:10 m is 40 MB of source for a
+Nothing here needs a finer basemap — 1:10 million is 40 MB of source for a
 correction smaller than a marker.
 
 The join itself is pure and unit-tested (`public/stations.js`,
