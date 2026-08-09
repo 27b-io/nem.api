@@ -51,6 +51,23 @@ describe('weatherEndpoint', () => {
     expect(new URL(weatherEndpoint('bogus', 'NSW1', nowMs).url).searchParams.get('past_days')).toBe('1');
   });
 
+  // Request-forgery invariant (Kody, PR #25): whatever region/range are fed
+  // in — URL-ish strings, path traversal, inherited object keys — the fetch
+  // target is always an allowlisted Open-Meteo host and the coordinates
+  // always come from the fixed REGION_COORDS table. app.js allowlists both
+  // upstream; this pins the last line of defence inside weatherEndpoint.
+  it('never lets a hostile region/range steer the host or the coordinates', () => {
+    const hostile = ['https://evil.example', '//evil.example/x', '../../etc/passwd', '__proto__', 'constructor'];
+    for (const region of hostile) {
+      for (const range of hostile) {
+        const url = new URL(weatherEndpoint(range, region, nowMs).url);
+        expect(['api.open-meteo.com', 'archive-api.open-meteo.com']).toContain(url.hostname);
+        expect(url.searchParams.get('latitude')).toBe(String(REGION_COORDS.NSW1.lat));
+        expect(url.searchParams.get('longitude')).toBe(String(REGION_COORDS.NSW1.lon));
+      }
+    }
+  });
+
   it('has a reference point for every NEM region plus the NEM-wide default', () => {
     for (const region of ['NSW1', 'QLD1', 'VIC1', 'SA1', 'TAS1', '']) {
       const coords = REGION_COORDS[region];
@@ -129,11 +146,8 @@ describe('WEATHER_VARS and WEATHER_INK', () => {
     const { FUEL_SLOTS } = await import('../public/stacking');
     const { OVERLAY_INKS } = await import('../public/overlays');
     const taken = new Set([
-      ...FUEL_SLOTS.flatMap((f: { light: string; dark: string }) => [f.light, f.dark]),
-      ...Object.values(OVERLAY_INKS as Record<string, { light: string; dark: string }>).flatMap((i) => [
-        i.light,
-        i.dark,
-      ]),
+      ...FUEL_SLOTS.flatMap((f) => [f.light, f.dark]),
+      ...Object.values(OVERLAY_INKS).flatMap((i) => [i.light, i.dark]),
     ]);
     for (const theme of ['light', 'dark'] as const) {
       const hex = WEATHER_INK[theme];

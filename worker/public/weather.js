@@ -64,8 +64,15 @@ const isoDate = (d) => d.toISOString().slice(0, 10);
  * `nowMs` is injected (never Date.now() internally) so this stays a pure,
  * deterministically testable function. */
 export function weatherEndpoint(range, region, nowMs) {
-  const days = RANGE_DAYS[range] ?? RANGE_DAYS['24h'];
-  const { lat, lon } = REGION_COORDS[region] ?? REGION_COORDS[''];
+  // Own-property lookups, not `?? fallback`: app.js already allowlists both
+  // values (REGIONS/RANGES), but this function is the last stop before a
+  // cross-origin fetch, so it must not trust its inputs either. A plain
+  // `REGION_COORDS[region] ?? …` lets inherited keys ('constructor',
+  // '__proto__') through the fallback and puts undefined coordinates in the
+  // URL; hasOwn pins every unknown input to the defaults instead. The hosts
+  // themselves are hardcoded below — no input reaches them.
+  const days = Object.hasOwn(RANGE_DAYS, range) ? RANGE_DAYS[range] : RANGE_DAYS['24h'];
+  const { lat, lon } = Object.hasOwn(REGION_COORDS, region) ? REGION_COORDS[region] : REGION_COORDS[''];
   const base = {
     latitude: lat,
     longitude: lon,
