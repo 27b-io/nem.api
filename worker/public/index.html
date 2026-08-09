@@ -40,7 +40,8 @@
 
   <main class="mx-auto max-w-6xl space-y-4 p-4">
     <!-- Filter row: region (LAB-419) + time range (LAB-1697) + chart overlays
-         (LAB-1700) + intensity overlay toggle (LAB-1698); they compose. -->
+         (LAB-1700) + weather overlay (LAB-1699) + intensity overlay toggle
+         (LAB-1698); they compose. -->
     <div class="flex flex-wrap items-center gap-x-6 gap-y-3">
       <nav class="flex flex-wrap items-center gap-3" aria-label="Region filter">
         <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">Region</span>
@@ -61,6 +62,11 @@
           <input type="checkbox" class="checkbox checkbox-xs" id="overlay-price">
           Price
         </label>
+      </nav>
+      <nav class="flex flex-wrap items-center gap-2" aria-label="Weather overlay"
+           title="Wind speed at 100 m, temperature, and solar irradiance from Open-Meteo, at a reference point for the selected region — not a capacity-weighted average of the fleet.">
+        <select class="select select-xs" id="weather-overlay" aria-label="Weather overlay"></select>
+        <span class="text-xs text-warning hidden" id="weather-note">Weather data unavailable right now.</span>
       </nav>
       <label class="flex cursor-pointer items-center gap-2 text-sm"
              title="AEMO's 30-minute estimate of behind-the-meter rooftop PV. Off = grid-scale generation only.">
@@ -142,6 +148,12 @@
     Data &copy; AEMO, via NEMWEB &middot;
     <a class="link" href="https://github.com/27b-io/nem.api/blob/master/worker/API.md">API contract</a> &middot;
     <a class="link" href="/api/v2/values/aggregate?group_by=fuel">raw JSON</a>
+    <!-- CC-BY 4.0 obligation (LAB-1699): shown whenever the weather overlay
+         has been switched on, toggled by app.js's updateWeatherUi(). -->
+    <span class="hidden" id="weather-attribution">
+      &middot; Weather data by
+      <a class="link" href="https://open-meteo.com" target="_blank" rel="noopener noreferrer">Open-Meteo.com</a>
+    </span>
   </footer>
 
   <script src="/vendor/uPlot.iife.min.js"></script>
