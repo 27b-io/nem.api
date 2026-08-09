@@ -54,6 +54,13 @@ describe('alignOverlays', () => {
       price: [null, null, null],
       demand: [null, null, null],
     });
+    // a series element missing its price/demand arrays (malformed body behind
+    // a 200, one level deeper than a missing series) must also degrade to
+    // null, not throw on the first matching timestamp.
+    expect(alignOverlays(chartTs, { timestamps: [100, 200, 300], series: [{ region: 'NSW1' }] }, 'NSW1')).toEqual({
+      price: [null, null, null],
+      demand: [null, null, null],
+    });
   });
 });
 
@@ -117,6 +124,8 @@ describe('alignRooftop', () => {
     // timestamps without a series array (malformed body behind a 200) must
     // degrade to the same honest-absent state, not throw mid-render.
     expect(alignRooftop([H1], 300, { timestamps: [H1] }, 'NSW1')).toEqual([null]);
+    // ...and so must a series element missing its power array.
+    expect(alignRooftop([H1], 300, { timestamps: [H1], series: [{ region: 'NSW1' }] }, 'NSW1')).toEqual([null]);
     expect(alignRooftop([H1], 300, rooftop, 'QLD1')).toEqual([null]);
   });
 });

@@ -70,7 +70,7 @@ export function alignRooftop(chartTimestamps, chartResolution, rooftop, region) 
     let sum = 0;
     let saw = false;
     for (const s of selected) {
-      const v = s.power[i];
+      const v = s.power?.[i];
       if (v != null) {
         sum += v;
         saw = true;
@@ -101,11 +101,11 @@ export function alignOverlays(chartTimestamps, dispatch, region) {
   chartTimestamps.forEach((t, out) => {
     const i = index.get(t);
     if (i === undefined) return;
-    if (single) price[out] = single.price[i] ?? null;
+    if (single) price[out] = single.price?.[i] ?? null;
     let sum = 0;
     let saw = false;
     for (const s of selected) {
-      const v = s.demand[i];
+      const v = s.demand?.[i];
       if (v != null) {
         sum += v;
         saw = true;
