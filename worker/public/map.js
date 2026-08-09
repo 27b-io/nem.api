@@ -16,27 +16,26 @@
  * dark mode and a third-party request on every page view. Pan/zoom over an SVG
  * viewBox is ~40 lines; Leaflet is 140 kB to save them.
  */
+import { $, fetchJson, installTheme, REGIONS, showError, TZ } from './chrome.js';
 import { FUEL_SLOTS, fuelColor } from './stacking.js';
 import { emissionsRate, facilityOutput, joinStations, markerRadius, mercator, sparkPath } from './stations.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const LABEL_PX = 13; // jurisdiction label size, in screen pixels
+const DISPATCH_INTERVAL = 300; // seconds; the NEM dispatch cadence
+const FRAME_MARGIN = 0.06; // breathing room around a framed region
 
-// Same five regions and the same NEM-wide default as the chart page.
-const REGIONS = [
-  ['', 'NEM'], ['QLD1', 'QLD'], ['NSW1', 'NSW'],
-  ['VIC1', 'VIC'], ['SA1', 'SA'], ['TAS1', 'TAS'],
-];
-
-const TZ = 'Australia/Brisbane'; // NEM market time: AEST, UTC+10, never DST
 const fmtMW = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
 const fmtMW1 = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 1 });
 const fmtFactor = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 3 });
+// Emissions rates span a landfill unit's fraction of a tonne per hour to a coal
+// station's two thousand; significant digits keep both readable, and keep the
+// small one from rounding to a zero we explicitly promise not to report.
+const fmtRate = new Intl.NumberFormat('en-AU', { maximumSignificantDigits: 3 });
 const fmtWhen = new Intl.DateTimeFormat('en-AU', {
   timeZone: TZ, weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
 });
 
-const $ = (id) => document.getElementById(id);
 const svg = $('map');
 
 const state = {
@@ -80,21 +79,6 @@ function safeUrl(url) {
   }
 }
 
-async function fetchJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }
-    throw new Error(detail);
-  }
-  return res.json();
-}
-
-function showError(message) {
-  $('error-text').textContent = message;
-  $('error-alert').classList.remove('hidden');
-}
-
 /* ------------------------------------------------------------------ basemap */
 
 function ringPath(ring) {
@@ -120,9 +104,11 @@ function ringBounds(rings) {
   return box;
 }
 
-/** A view box that frames `bounds` at the map's fixed aspect, with margin. */
-function frame(bounds, margin = 0.06) {
-  const aspect = state.home ? state.home.w / state.home.h : (bounds.maxX - bounds.minX) / (bounds.maxY - bounds.minY);
+/** A view box that frames `bounds` at `aspect`, with a margin around it.
+ *  The aspect is passed in rather than read off state.home, because the first
+ *  call is the one that PRODUCES state.home. */
+function frame(bounds, aspect) {
+  const margin = FRAME_MARGIN;
   const cx = (bounds.minX + bounds.maxX) / 2;
   const cy = (bounds.minY + bounds.maxY) / 2;
   let w = (bounds.maxX - bounds.minX) * (1 + margin * 2);
@@ -136,7 +122,7 @@ function frame(bounds, margin = 0.06) {
 function renderBasemap(basemap) {
   const all = basemap.regions.flatMap((r) => r.rings);
   const bounds = ringBounds(all);
-  state.home = frame(bounds);
+  state.home = frame(bounds, (bounds.maxX - bounds.minX) / (bounds.maxY - bounds.minY));
   svg.style.aspectRatio = String(state.home.w / state.home.h);
 
   const land = document.createElementNS(SVG_NS, 'g');
@@ -206,17 +192,17 @@ function paintMarkers() {
   }
 }
 
-/** Marker radii and label type are specified in SCREEN PIXELS, but SVG
- *  presentation attributes are in user units — at this viewBox a `10px` label
+/** Marker radii AND jurisdiction label type are specified in SCREEN PIXELS,
+ *  but SVG presentation attributes are in user units — at this viewBox a `10px` label
  *  renders about 150 px tall and swallows the continent. Both are converted on
  *  every view change, which is also what keeps a pin a pin at any zoom. */
-function rescaleMarkers() {
+function rescaleToScreenPixels() {
   // Floored at the narrowest real viewport. A zero or near-zero here means the
   // SVG has no usable layout yet — booted in a background tab, in a hidden
   // container, or under a headless engine — and dividing by it scales every
   // marker by most of the viewBox and paints the map solid. The resize
   // listener corrects the figure the moment real layout happens.
-  const width = Math.max(svg.clientWidth, svg.getBoundingClientRect().width, 320);
+  const width = Math.max(svg.clientWidth, 320);
   const k = state.view.w / width;
   for (const marker of state.markers.values()) {
     marker.setAttribute('r', (Number(marker.dataset.px) * k).toFixed(4));
@@ -240,7 +226,7 @@ function clampView(view) {
 function setView(view) {
   state.view = view;
   svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
-  rescaleMarkers();
+  rescaleToScreenPixels();
 }
 
 /* --------------------------------------------------------------- pan / zoom */
@@ -255,6 +241,11 @@ function clientToUser(clientX, clientY) {
 
 function installPanZoom() {
   svg.addEventListener('wheel', (event) => {
+    // Zoom only on a modified wheel. The map is taller than most viewports, so
+    // swallowing every wheel event traps a visitor scrolling past it — they
+    // can never reach the legend, the caveats, or the licence attribution in
+    // the footer, which is the CC BY-NC compliance surface.
+    if (!event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
     const anchor = clientToUser(event.clientX, event.clientY);
     // Continuous in deltaY so a trackpad's fine-grained events feel smooth and
@@ -307,13 +298,7 @@ function installPanZoom() {
     event.stopPropagation();
   }, true);
 
-  $('reset-view').addEventListener('click', () => {
-    state.region = '';
-    renderRegionFilter();
-    paintMarkers();
-    setView(state.home);
-    syncUrl();
-  });
+  $('reset-view').addEventListener('click', () => setRegion(''));
 }
 
 /* ------------------------------------------------------------------ chrome */
@@ -328,22 +313,30 @@ function renderRegionFilter() {
       text: label,
       'aria-pressed': String(state.region === id),
     });
-    button.addEventListener('click', () => {
-      state.region = id;
-      renderRegionFilter();
-      paintMarkers();
-      setView(id ? frame(regionBounds(id)) : state.home);
-      syncUrl();
-    });
+    button.addEventListener('click', () => setRegion(id));
     nav.append(button);
   }
 }
 
+/** Select a region ('' = the whole NEM) and frame it. The one place region
+ *  state changes, so the buttons, the reset control and a `?region=` deep link
+ *  cannot drift into three slightly different behaviours. */
+function setRegion(id) {
+  state.region = id;
+  renderRegionFilter();
+  paintMarkers();
+  const bounds = id ? regionBounds(id) : null;
+  setView(bounds ? frame(bounds, state.home.w / state.home.h) : state.home);
+  syncUrl();
+}
+
 /** Frame a region on its own stations, not its border: the point of zooming to
- *  South Australia is to separate the pins, and half of SA has none. */
+ *  South Australia is to separate the pins, and half of SA has none. Returns
+ *  null when the region has none at all, which the caller renders as the
+ *  whole-NEM view rather than as a viewBox full of NaN. */
 function regionBounds(region) {
   const points = state.stations.filter((s) => s.region === region).map((s) => mercator(s.lng, s.lat));
-  if (points.length === 0) return { minX: state.home.x, minY: state.home.y, maxX: state.home.x + state.home.w, maxY: state.home.y + state.home.h };
+  if (points.length === 0) return null;
   return {
     minX: Math.min(...points.map((p) => p.x)), maxX: Math.max(...points.map((p) => p.x)),
     minY: Math.min(...points.map((p) => p.y)), maxY: Math.max(...points.map((p) => p.y)),
@@ -411,7 +404,7 @@ function renderPanel(station) {
     ]),
     el('dl', { class: 'grid gap-x-6 gap-y-1 text-sm' }, [
       ...field('Region', station.region),
-      ...field('Fuel', station.units.map((u) => u.fuel_type || 'Unspecified').filter(unique).join(', ')),
+      ...field('Fuel', [...new Set(station.units.map((u) => u.fuel_type || 'Unspecified'))].join(', ')),
       ...field('Technology', techs.join(', ') || '—'),
       ...field('Registered capacity', `${fmtMW1.format(station.capacity)} MW`),
       ...field('Dispatch units', String(station.units.length)),
@@ -437,8 +430,6 @@ function renderPanel(station) {
   });
 }
 
-const unique = (v, i, a) => a.indexOf(v) === i;
-
 function field(label, value) {
   return [
     el('dt', { class: 'text-[0.65rem] uppercase tracking-widest text-base-content/50', text: label }),
@@ -452,12 +443,20 @@ async function loadOutput(station, token) {
   if (token !== state.detailToken) return;
 
   const output = facilityOutput(payload, duids);
+  // `latest` is the last bucket in a 24-hour window that held any reading — for
+  // a station that shut down this morning that is hours old, and calling it
+  // "output now" in 36 px type would be a lie with a timestamp underneath it.
+  // Two dispatch intervals of slack absorbs ordinary ingest lag.
+  const stale = output.latest != null && Date.now() / 1000 - output.latest.time > 2 * DISPATCH_INTERVAL;
   const emissions = emissionsRate(station.units, output.latest?.byDuid);
 
   const live = $('live');
   live.textContent = '';
   live.append(
-    el('p', { class: 'text-[0.65rem] uppercase tracking-widest text-base-content/50', text: 'Output now, net' }),
+    el('p', {
+      class: 'text-[0.65rem] uppercase tracking-widest text-base-content/50',
+      text: stale ? 'Last reading, net' : 'Output now, net',
+    }),
     el('p', {
       class: 'text-4xl font-semibold',
       text: output.latest ? `${fmtMW1.format(output.latest.value)} MW` : '—',
@@ -465,7 +464,7 @@ async function loadOutput(station, token) {
     el('p', {
       class: 'text-xs text-base-content/60',
       text: output.latest
-        ? `${fmtWhen.format(output.latest.time * 1000)} AEST · 5-min interval ending`
+        ? `${fmtWhen.format(output.latest.time * 1000)} AEST · 5-min interval ending${stale ? ' · not currently dispatching' : ''}`
         : 'No dispatch data in the last 24 hours.',
     }),
   );
@@ -484,7 +483,7 @@ async function loadOutput(station, token) {
     }));
   }
 
-  live.append(sparkline(output), emissionsBlock(station, output, emissions), unitTable(station, output));
+  live.append(sparkline(output), emissionsBlock(station, output, emissions, stale), unitTable(station, output));
 }
 
 const SPARK_W = 100;
@@ -512,7 +511,7 @@ function sparkline(output) {
   chart.setAttribute('aria-hidden', 'true');
   // Only worth drawing when something went below it — a battery charging must
   // read as under the line, not merely as small.
-  if (spark.min < 0) {
+  if (spark.low < 0) {
     const zero = document.createElementNS(SVG_NS, 'line');
     zero.setAttribute('class', 'spark-zero');
     zero.setAttribute('x1', '0');
@@ -528,12 +527,12 @@ function sparkline(output) {
 
   wrap.append(chart, el('p', {
     class: 'text-xs text-base-content/60',
-    text: `${fmtMW1.format(spark.min)} to ${fmtMW1.format(spark.max)} MW over the window`,
+    text: `${fmtMW1.format(spark.low)} to ${fmtMW1.format(spark.high)} MW over the window`,
   }));
   return wrap;
 }
 
-function emissionsBlock(station, output, emissions) {
+function emissionsBlock(station, output, emissions, stale) {
   const factored = station.units.filter((u) => u.emissions_factor != null);
   const sources = [...new Set(station.units.map((u) => u.fuel_description || u.fuel_type).filter(Boolean))];
   const wrap = el('div', {}, [
@@ -559,10 +558,13 @@ function emissionsBlock(station, output, emissions) {
       : fmtFactor.format(range[0])} tCO₂-e/MWh sent out · ${sources.join(', ') || 'source unstated'}`,
   }));
 
-  if (emissions.rate != null) {
+  if (emissions.rate != null && !stale) {
     wrap.append(el('p', {
+      // Two significant figures, never a fixed 0 dp: a small landfill-gas unit
+      // emits well under 1 t/h, and rounding it to "≈ 0" is exactly the
+      // reported-as-zero claim the note below this disclaims making.
       class: 'text-4xl font-semibold',
-      text: `≈ ${fmtMW.format(emissions.rate)} tCO₂-e/h`,
+      text: `≈ ${fmtRate.format(emissions.rate)} tCO₂-e/h`,
     }), el('p', {
       class: 'text-xs text-base-content/60',
       text: `Estimated at the output above (${fmtMW1.format(emissions.coveredMw)} MW carrying a published factor).`,
@@ -570,7 +572,9 @@ function emissionsBlock(station, output, emissions) {
   } else {
     wrap.append(el('p', {
       class: 'text-sm text-base-content/60',
-      text: output.latest ? 'Not sending out — no emissions rate to estimate.' : 'No current output to estimate from.',
+      text: stale
+        ? 'Not dispatching — a rate from the last reading would not be a current one.'
+        : output.latest ? 'Not sending out — no emissions rate to estimate.' : 'No current output to estimate from.',
     }));
   }
 
@@ -610,28 +614,6 @@ function unitTable(station, output) {
 
 /* -------------------------------------------------------------------- boot */
 
-function installTheme() {
-  const params = new URLSearchParams(location.search);
-  const queryExplicit = params.get('theme') === 'light' || params.get('theme') === 'dark';
-  const toggle = $('theme-toggle');
-  toggle.checked = document.documentElement.dataset.theme === 'dark';
-  const apply = (theme) => {
-    document.documentElement.dataset.theme = theme;
-    paintMarkers();
-    renderLegend();
-  };
-  toggle.addEventListener('change', () => {
-    const theme = toggle.checked ? 'dark' : 'light';
-    localStorage.setItem('theme', theme);
-    apply(theme);
-  });
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
-    if (queryExplicit || localStorage.getItem('theme')) return;
-    toggle.checked = event.matches;
-    apply(event.matches ? 'dark' : 'light');
-  });
-}
-
 async function boot() {
   const [basemap, snapshot, generators] = await Promise.all([
     fetchJson('/basemap.json'),
@@ -639,7 +621,7 @@ async function boot() {
     fetchJson('/api/v2/generators'),
   ]);
 
-  const { stations, unmatched } = joinStations(snapshot, generators);
+  const { stations, unmatched, regionMismatch } = joinStations(snapshot, generators);
   state.stations = stations;
   state.byCode = new Map(stations.map((s) => [s.code, s]));
 
@@ -647,20 +629,30 @@ async function boot() {
   renderMarkers();
   setView(state.home);
   installPanZoom();
-  installTheme();
+  // Marker fills and legend swatches are attribute-baked, so a theme switch
+  // has to repaint them — the map's equivalent of the chart's canvas redraw.
+  installTheme(() => {
+    paintMarkers();
+    renderLegend();
+  });
   renderRegionFilter();
   renderLegend();
   renderStationSelect();
 
   const pinned = stations.reduce((n, s) => n + s.units.length, 0);
-  const joinable = pinned + unmatched.length;
+  // Both kinds of miss count against the denominator. Leaving the
+  // region-disagreement units out of it entirely would make the coverage
+  // figure IMPROVE every time the guard vetoed a station — the one number on
+  // this page whose whole job is to admit what is missing.
+  const joinable = pinned + unmatched.length + regionMismatch.length;
   $('station-count').textContent = fmtMW.format(stations.length);
-  // The unmatched count is stated, not hidden: a map that quietly drops units
-  // is a map you cannot reason about. Most of the gap is new grid batteries
-  // that the geodata snapshot predates.
   $('coverage-note').textContent =
     `${fmtMW.format(pinned)} of ${fmtMW.format(joinable)} registered dispatch units placed` +
-    (unmatched.length ? ` · ${unmatched.length} without a known location` : '');
+    (unmatched.length ? ` · ${unmatched.length} without a known location` : '') +
+    (regionMismatch.length ? ` · ${regionMismatch.length} whose location and region disagree` : '');
+  if (regionMismatch.length) {
+    console.warn('station map: units not pinned, snapshot and AEMO disagree on region:', regionMismatch);
+  }
 
   // Deep links: /map.html?region=SA1&station=TORRB
   const params = new URLSearchParams(location.search);
@@ -676,7 +668,7 @@ async function boot() {
 
   // The viewBox is in user units but marker radii are in screen pixels, so a
   // resize changes the conversion factor.
-  addEventListener('resize', rescaleMarkers);
+  addEventListener('resize', rescaleToScreenPixels);
 }
 
 $('error-retry').addEventListener('click', () => location.reload());

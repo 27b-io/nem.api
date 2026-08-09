@@ -66,7 +66,12 @@
   /* Australia is roughly 1.15:1 in Mercator; the box is set from the basemap's
      own aspect at boot, this is just the pre-load reservation. */
   aspect-ratio: 1.15;
-  touch-action: none; /* pointer drag pans; without this the browser scrolls */
+  /* pan-y, not none: horizontal drag pans the map while vertical swipes still
+     scroll the page. `none` would make a map taller than the phone screen a
+     dead end you cannot swipe past — the same trap the ctrl-to-zoom rule in
+     map.js avoids on the desktop wheel. Vertical map panning is the cost; the
+     region buttons reframe without it. */
+  touch-action: pan-y;
   cursor: grab;
 }
 #map.dragging {
@@ -180,4 +185,12 @@
   border-radius: 2px;
   vertical-align: -1px;
   margin-inline-end: 0.3rem;
+}
+
+kbd {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  padding: 0 0.2em;
+  border: 1px solid var(--chart-grid);
+  border-radius: 3px;
 }

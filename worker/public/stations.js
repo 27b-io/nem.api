@@ -195,9 +195,11 @@ export function dominantFuel(units) {
     entry.count += 1;
     byFuel.set(key, entry);
   }
+  // '' for no units: the empty key is already this function's "unspecified
+  // fuel" answer, and an exported pure function should not throw on [].
   return [...byFuel.entries()].sort(
     (a, b) => b[1].capacity - a[1].capacity || b[1].count - a[1].count || a[0].localeCompare(b[0]),
-  )[0][0];
+  )[0]?.[0] ?? '';
 }
 
 /* --------------------------------------------------------------------------
@@ -286,25 +288,33 @@ export function facilityOutput(payload, duids) {
 }
 
 /**
- * Sparkline geometry for a facility total: `{ d, min, max, zeroY }` in a
+ * Sparkline geometry for a facility total: `{ d, low, high, zeroY }` in a
  * `W × H` box, or null when there is nothing to draw.
  *
- * Two rules, both about not drawing data that does not exist:
+ * Three rules, all about not drawing data that does not exist:
  * - x is TIME, not bucket index. `/api/v2/values` returns only buckets that
  *   hold a sample, so an index axis would render a two-hour outage at the same
  *   slope as two adjacent five-minute intervals and the gap would vanish.
  * - a null bucket lifts the pen. The path breaks and resumes; it never bridges
- *   across missing data.
- *
- * The domain always includes zero so a charging battery reads as below the
- * baseline rather than merely small, and `zeroY` is where that baseline goes.
+ *   across missing data. A reading isolated between two nulls still emits a
+ *   zero-length segment, so one sample after an outage is a round dot rather
+ *   than nothing at all.
+ * - `low`/`high` are the REAL extremes of the data, not the plot domain. The
+ *   domain is padded to include zero so a charging battery reads as below the
+ *   baseline rather than merely small — but a caller captioning the domain
+ *   would tell every always-on coal station it fell to 0 MW overnight.
  */
 export function sparkPath(timestamps, total, width, height) {
   const present = total.filter((v) => v != null);
+  // The length guard is not decoration: the two arrays come from one payload
+  // today, but a mismatched pair silently produces NaN coordinates rather than
+  // a visible failure, and this function is exported.
   if (present.length < 2 || timestamps.length !== total.length) return null;
 
-  const min = Math.min(0, ...present);
-  const max = Math.max(0, ...present);
+  const low = Math.min(...present);
+  const high = Math.max(...present);
+  const min = Math.min(0, low);
+  const max = Math.max(0, high);
   const span = max - min || 1;
   const t0 = timestamps[0];
   const tSpan = timestamps[timestamps.length - 1] - t0 || 1;
@@ -312,17 +322,27 @@ export function sparkPath(timestamps, total, width, height) {
   const py = (v) => height - ((v - min) / span) * height;
 
   let d = '';
-  let pen = false;
+  let open = false; // a segment is in progress
+  let alone = true; // …and it is still a single point
   total.forEach((v, i) => {
     if (v == null) {
-      pen = false;
+      if (open && alone) d += `L${px(i - 1).toFixed(2)} ${py(total[i - 1]).toFixed(2)}`;
+      open = false;
       return;
     }
-    d += `${pen ? 'L' : 'M'}${px(i).toFixed(2)} ${py(v).toFixed(2)}`;
-    pen = true;
+    if (open) {
+      d += `L${px(i).toFixed(2)} ${py(v).toFixed(2)}`;
+      alone = false;
+    } else {
+      d += `M${px(i).toFixed(2)} ${py(v).toFixed(2)}`;
+      open = true;
+      alone = true;
+    }
   });
+  const last = total.length - 1;
+  if (open && alone) d += `L${px(last).toFixed(2)} ${py(total[last]).toFixed(2)}`;
 
-  return { d, min, max, zeroY: py(0) };
+  return { d, low, high, zeroY: py(0) };
 }
 
 /**
@@ -342,13 +362,11 @@ export function sparkPath(timestamps, total, width, height) {
 export function emissionsRate(units, latestByDuid) {
   let rate = 0;
   let coveredMw = 0;
-  let totalMw = 0;
   const unfactored = [];
 
   for (const unit of units) {
     const mw = latestByDuid?.[unit.duid];
     if (mw == null || mw <= 0) continue;
-    totalMw += mw;
     if (unit.emissions_factor == null) {
       unfactored.push(unit.duid);
       continue;
@@ -357,11 +375,8 @@ export function emissionsRate(units, latestByDuid) {
     coveredMw += mw;
   }
 
-  return {
-    rate: coveredMw > 0 ? rate : null,
-    coveredMw,
-    totalMw,
-    unfactored,
-    coverage: totalMw > 0 ? coveredMw / totalMw : null,
-  };
+  // `coveredMw` is the MW the rate was actually computed over and `unfactored`
+  // names what was left out — between them the caller can state the shortfall
+  // exactly, which is why there is no separate coverage ratio to round.
+  return { rate: coveredMw > 0 ? rate : null, coveredMw, unfactored };
 }

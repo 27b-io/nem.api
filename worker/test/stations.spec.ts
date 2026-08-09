@@ -184,6 +184,7 @@ describe('dominantFuel', () => {
 
   it('folds a missing fuel to the empty key rather than throwing', () => {
     expect(dominantFuel([{ fuel_type: null, reg_cap: 1 }])).toBe('');
+    expect(dominantFuel([])).toBe('');
   });
 });
 
@@ -281,25 +282,25 @@ describe('emissionsRate', () => {
   it('sums MW x factor over the units with a published factor', () => {
     const out = emissionsRate(units, { A: 100, B: 50 });
     expect(out.rate).toBeCloseTo(130);
-    expect(out.coverage).toBe(1);
+    expect(out.coveredMw).toBe(150);
   });
 
   it('excludes an unfactored unit from both halves and discloses it', () => {
     const out = emissionsRate(units, { A: 100, C: 100 });
     expect(out.rate).toBeCloseTo(90);
     expect(out.unfactored).toEqual(['C']);
-    expect(out.coverage).toBe(0.5);
+    expect(out.coveredMw).toBe(100); // C's 100 MW is in neither half
   });
 
   it('ignores charging and station load — a net consumer sends nothing out', () => {
     const out = emissionsRate(units, { A: 100, B: -40 });
     expect(out.rate).toBeCloseTo(90);
-    expect(out.totalMw).toBe(100);
+    expect(out.coveredMw).toBe(100);
   });
 
   it('returns a null rate, not 0, when nothing factored is generating', () => {
-    expect(emissionsRate(units, { C: 100 })).toMatchObject({ rate: null, coverage: 0, unfactored: ['C'] });
-    expect(emissionsRate(units, {})).toMatchObject({ rate: null, coverage: null });
+    expect(emissionsRate(units, { C: 100 })).toMatchObject({ rate: null, unfactored: ['C'] });
+    expect(emissionsRate(units, {})).toMatchObject({ rate: null, coveredMw: 0 });
     expect(emissionsRate(units, undefined)).toMatchObject({ rate: null });
   });
 });
@@ -311,7 +312,15 @@ describe('sparkPath', () => {
     const spark = sparkPath(evenly, [100, 50, 100, 0], 100, 30);
     // max=100 -> y 0, min=0 -> y 30 (SVG y grows downward).
     expect(spark?.d).toBe('M0.00 0.00L33.33 15.00L66.67 0.00L100.00 30.00');
-    expect(spark).toMatchObject({ min: 0, max: 100, zeroY: 30 });
+    expect(spark).toMatchObject({ low: 0, high: 100, zeroY: 30 });
+  });
+
+  it('reports the REAL extremes, not the zero-padded plot domain', () => {
+    // A coal station that never dropped below 400 MW must not be captioned
+    // "0 to 520 MW" just because the domain is padded down to zero.
+    const spark = sparkPath(evenly, [400, 480, 520, 455], 100, 30);
+    expect(spark).toMatchObject({ low: 400, high: 520 });
+    expect(spark?.zeroY).toBe(30); // …while zero is still the baseline
   });
 
   it('spaces an outage by its real duration, not by bucket count', () => {
@@ -323,15 +332,21 @@ describe('sparkPath', () => {
 
   it('lifts the pen over a null bucket instead of bridging it', () => {
     const spark = sparkPath(evenly, [100, null, null, 50], 100, 30);
-    // Two moves, no line between them: the renderer draws two dots' worth of
-    // path and nothing across the hole.
-    expect(spark?.d).toBe('M0.00 0.00M100.00 15.00');
+    // Each isolated reading gets a zero-length segment of its own, so a round
+    // cap renders it as a dot. A bare `M` would draw nothing at all and the
+    // sample would silently vanish.
+    expect(spark?.d).toBe('M0.00 0.00L0.00 0.00M100.00 15.00L100.00 15.00');
+  });
+
+  it('keeps a single sample after an outage visible', () => {
+    const spark = sparkPath([0, 300, 600, 900], [null, 40, null, 80], 100, 30);
+    expect(spark?.d).toBe('M33.33 15.00L33.33 15.00M100.00 0.00L100.00 0.00');
   });
 
   it('puts a charging battery below the zero line', () => {
     const spark = sparkPath([0, 300], [-40, 40], 100, 30);
     expect(spark?.zeroY).toBe(15);
-    expect(spark?.min).toBe(-40);
+    expect(spark?.low).toBe(-40);
   });
 
   it('draws nothing from fewer than two readings, or a mismatched pair of arrays', () => {

@@ -44,6 +44,8 @@ jobs:
         run: npm run refresh:check
       - name: Verify station-geodata join (captured facility-dump sample)
         run: npm run facilities:check
+      - name: Verify the unscanned map page's classes still exist
+        run: npm run check:classes
       - name: Verify built stylesheet is committed and current
         run: |
           npm run build:css

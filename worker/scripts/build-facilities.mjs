@@ -21,7 +21,11 @@
 //
 //   node scripts/build-facilities.mjs              fetch live, write, report
 //   node scripts/build-facilities.mjs --self-check pure-core check, no network
-//   node scripts/build-facilities.mjs --from f.json --generators g.json
+//   node scripts/build-facilities.mjs --from f.json --generators g.json --values v.json
+//
+// Nothing here is exported: the build body runs at module scope, so an import
+// would fetch Open Electricity and overwrite the committed snapshot as a side
+// effect of reading a constant.
 //
 // The coverage report is the point of the exercise, not a footnote: re-run it
 // on every refresh and read the unmatched list. See worker/README.md.
@@ -29,7 +33,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { buildSnapshot, joinStations, unitAliases } from '../public/stations.js';
 
-export const SOURCE_URL = 'https://data.openelectricity.org.au/v4/facilities/au_facilities.json';
+const SOURCE_URL = 'https://data.openelectricity.org.au/v4/facilities/au_facilities.json';
 const GENERATORS_URL = 'https://nem.27b.io/api/v2/generators';
 const VALUES_URL = 'https://nem.27b.io/api/v2/values?hours=2';
 

@@ -88,8 +88,11 @@ daisyUI `data-theme`.
   the `public/` directory: the stylesheet is shared with the station map, and
   a directory scan meant a class used only there still grew what this page
   downloads (it also scanned the vendored uPlot bundle, which was 10 kB of the
-  output). **Add a new chart-page file to that list or its classes silently go
-  missing.**
+  output). Two silent failure modes fall out, so **add a new chart-page file to
+  that list or its classes go missing**, and note that the map page may use
+  only classes this list already emits — `npm run check:classes` fails CI if it
+  ever uses one that is gone. The scanner also reads prose: the bare word
+  "grow" in a comment emits `.grow{flex-grow:1}`.
 - **Time**: axis and "as at" stamps are NEM market time (AEST, UTC+10, no
   DST) via `Australia/Brisbane` — never `Australia/Sydney`. Buckets are
   period-ending.
@@ -102,6 +105,14 @@ area not radius tracks MW). Click a pin for the drill-down: registration
 details, the last 24 h of the station's own output as a sparkline over
 `/api/v2/values?duid=…`, its AEMO CDEII emission factor, and an estimated
 emissions rate at current output. Deep-linkable: `/map?region=SA1&station=TORRB`.
+
+Shared page chrome (`$`, `fetchJson`, `showError`, `REGIONS`, `TZ`, the theme
+toggle) lives in `public/chrome.js` and is imported by both pages; the theme
+callback is the parameter because the chart repaints a canvas and the map
+recolours SVG fills. Neither page hijacks the scroll: the wheel only zooms with
+ctrl/⌘ held and `touch-action: pan-y` keeps vertical swipes scrolling, because
+the map is taller than most viewports and swallowing the wheel makes the
+attribution in the footer unreachable.
 
 **No map library, no tile server.** The basemap is 2100 vertices of vendored
 public-domain geometry rendered as one SVG path per jurisdiction, pan/zoomed by

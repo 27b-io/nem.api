@@ -59,7 +59,7 @@ const round = (n) => Math.round(n * DP) / DP;
  * Rings that collapse below a triangle once rounded are dropped — at 3 dp
  * that is a feature smaller than a pixel, not a landmass.
  */
-export function ringsOf(geometry) {
+function ringsOf(geometry) {
   const polygons = geometry.type === 'MultiPolygon' ? geometry.coordinates : [geometry.coordinates];
   const rings = [];
   for (const [exterior] of polygons) {
