@@ -73,7 +73,10 @@ export const GENERATORS_TTL_SECONDS = 3600;
 // k2: LAB-1696 changed aggregate values at resolution 3600/86400 (rollup
 // path: full-bucket edge semantics, global-denominator means) — pre-rollup
 // entries must not survive the cutover.
-const KEY_VERSION = 'k2';
+// k3: LAB-1721 routed `values` at 3600/86400 to the same rollups (full-bucket
+// edge semantics) and changed its TTL policy to match — pre-cutover `values`
+// entries at those resolutions must not survive either.
+const KEY_VERSION = 'k3';
 
 /**
  * Seconds until this entry must expire so it never outlives the data:
@@ -230,17 +233,17 @@ export function buildCacheEntry(url: URL, nowSeconds: number): CacheEntry | null
       // Upper bound of the data the window can see (t = exact matches only).
       let upper =
         window.exact !== undefined && window.end !== undefined ? Math.min(window.exact, window.end) : (window.exact ?? window.end);
-      // Rollup-served responses (LAB-1696 aggregate, LAB-1698 intensity)
-      // return the FULL bucket straddling `time_end`, so the response keeps
-      // changing until that bucket completes — the closed test must clear the
-      // bucket end, not just `time_end`. `/values` and `/dispatch` read raw
-      // rows at every resolution and clip to the window, so they are excluded
-      // by route (allowlist, so a future raw route cannot inherit this by
-      // default); the rollup ROUTING condition itself comes from api.ts so it
-      // cannot drift here.
+      // Rollup-served responses (LAB-1696 aggregate, LAB-1698 intensity,
+      // LAB-1721 values) return the FULL bucket straddling `time_end`, so the
+      // response keeps changing until that bucket completes — the closed
+      // test must clear the bucket end, not just `time_end`. `/dispatch`
+      // reads raw rows at every resolution and clips to the window, so it
+      // stays excluded by route (allowlist, so a future raw route cannot
+      // inherit this by default); the rollup ROUTING condition itself comes
+      // from api.ts so it cannot drift here.
       if (
         upper !== undefined &&
-        (route === '/api/v2/values/aggregate' || route === '/api/v2/intensity') &&
+        (route === '/api/v2/values' || route === '/api/v2/values/aggregate' || route === '/api/v2/intensity') &&
         servedFromRollups(window, resolution)
       ) {
         upper = nemBucket(upper, resolution);

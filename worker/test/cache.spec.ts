@@ -168,12 +168,26 @@ describe('buildCacheEntry — TTL policy', () => {
     const q = `?group_by=fuel&time_start=${T0}&time_end=${T0 + 600}&resolution=86400`;
     const midBucket = T0 + 43200;
     expect(agg(q, midBucket).ttl).toBe(boundaryTtl(midBucket));
-    // The raw-path /values twin of the same window IS closed at that moment.
-    expect(entryFor(q.replace('group_by=fuel&', ''), midBucket)!.ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+    // The fine-resolution /values twin of the same window IS closed at that
+    // moment — 300/1800 stay on the raw path and clip to the window.
+    expect(entryFor(q.replace('group_by=fuel&', '').replace('resolution=86400', 'resolution=1800'), midBucket)!.ttl).toBe(
+      CLOSED_WINDOW_TTL_SECONDS,
+    );
     // Once the bucket end clears the ingest grace, the aggregate closes too.
     expect(agg(q, T0 + 86400 + INGEST_GRACE_SECONDS).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
     // Exact-time aggregate lookups stay on the raw path and close as before.
     expect(agg(`?group_by=fuel&time=${T0 + 600}&resolution=86400`, midBucket).ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+  });
+
+  it('rollup-served /values gets the same edge-bucket treatment (LAB-1721)', () => {
+    // Same seam as the aggregate above, now that `values` at 3600/86400 also
+    // reads the rollup tables and reports the FULL straddling bucket.
+    const q = `?time_start=${T0}&time_end=${T0 + 600}&resolution=86400`;
+    const midBucket = T0 + 43200;
+    expect(entryFor(q, midBucket)!.ttl).toBe(boundaryTtl(midBucket));
+    expect(entryFor(q, T0 + 86400 + INGEST_GRACE_SECONDS)!.ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
+    // Exact-time lookups stay on the raw path and close as before.
+    expect(entryFor(`?time=${T0 + 600}&resolution=86400`, midBucket)!.ttl).toBe(CLOSED_WINDOW_TTL_SECONDS);
   });
 
   it('rollup-served intensity gets the same edge-bucket treatment (LAB-1698)', () => {
