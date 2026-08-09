@@ -76,7 +76,9 @@ function ringsOf(geometry) {
   return rings;
 }
 
-const res = await fetch(SOURCE_URL, { signal: AbortSignal.timeout(60_000) }).catch((err) => {
+// cache: 'no-store' is a no-op in Node's undici (no HTTP cache) — it
+// declares freshness intent for runtimes that do cache.
+const res = await fetch(SOURCE_URL, { cache: 'no-store', signal: AbortSignal.timeout(60_000) }).catch((err) => {
   throw new Error(`fetching ${SOURCE_URL}: ${err.message} — basemap.json left untouched`, { cause: err });
 });
 assert.ok(res.ok, `HTTP ${res.status} fetching Natural Earth admin-1 — basemap.json left untouched`);

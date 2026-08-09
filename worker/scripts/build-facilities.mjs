@@ -29,6 +29,9 @@
 //
 // The coverage report is the point of the exercise, not a footnote: re-run it
 // on every refresh and read the unmatched list. See worker/README.md.
+// Convention: argv/user-input validation throws plain Errors (team review
+// rule); fetched-data shape guards and the self-check keep node:assert, which
+// cannot be disabled at runtime (unlike Python's -O). Don't "unify" either way.
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { buildSnapshot, joinStations, unitAliases } from '../public/stations.js';
@@ -50,13 +53,15 @@ const arg = (name) => {
   // A typed flag missing its value must abort — falling through to `undefined`
   // would silently switch the build to network mode and overwrite the snapshot.
   const value = process.argv[i + 1];
-  assert.ok(value && !value.startsWith('--'), `${name} needs a file path`);
+  if (!value || value.startsWith('--')) throw new Error(`${name} needs a file path`);
   return value;
 };
 
 async function loadJson(url, file) {
   if (file) return JSON.parse(readFileSync(file, 'utf8'));
-  const res = await fetch(url, { signal: AbortSignal.timeout(60_000) }).catch((err) => {
+  // cache: 'no-store' is a no-op in Node's undici (no HTTP cache) — it
+  // declares freshness intent for runtimes that do cache.
+  const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(60_000) }).catch((err) => {
     throw new Error(`fetching ${url}: ${err.message} — facilities.json left untouched`, { cause: err });
   });
   assert.ok(res.ok, `HTTP ${res.status} fetching ${url} — facilities.json left untouched`);
@@ -154,7 +159,7 @@ const { stations, unmatched, regionMismatch } = joinStations({ facilities }, gen
 const joinable = generators.filter((g) => g.duid && g.duid !== '-').length;
 // The coverage report is the point of the run — an empty or reshaped
 // generators payload would print NaN% on every line, which reads as success.
-assert.ok(joinable > 0, 'no joinable DUIDs in the generators payload — coverage report would be meaningless');
+if (joinable === 0) throw new Error('no joinable DUIDs in the generators payload — coverage report would be meaningless');
 const pct = (n) => `${((n / joinable) * 100).toFixed(1)}%`;
 
 console.log(`\nJoin coverage vs /api/v2/generators (${joinable} DUIDs):`);
