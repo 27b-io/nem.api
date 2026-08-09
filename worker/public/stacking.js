@@ -46,6 +46,21 @@ const OTHER_GRAYS = [
   { light: '#a7a79f', dark: '#6d6d66' },
 ];
 
+/* One fuel key -> its { light, dark } inks, order-independent.
+ *
+ * orderSeries below needs the same lookup but cycles the gray fallback so two
+ * unknown fuels in one chart stay tellable apart; a station marker has no
+ * "other markers in this payload" to differ from, so it takes the first gray
+ * and stays stable across renders. Shared so the map (LAB-1702) and the chart
+ * can never drift into two palettes — a Hydro station and the Hydro band must
+ * be the same blue or the legend lies. */
+export function fuelColor(key) {
+  const slot = FUEL_SLOTS.find((f) => f.key === key);
+  if (slot) return { light: slot.light, dark: slot.dark };
+  if (/battery|bess/i.test(key)) return BATTERY;
+  return OTHER_GRAYS[0];
+}
+
 /* Map the payload's series onto palette slots in fixed stack order.
  * Unknown keys keep their own series and label — they fold into gray, they
  * are never dropped and never silently merged. */
@@ -56,7 +71,7 @@ export function orderSeries(series) {
       const slot = FUEL_SLOTS.findIndex((f) => f.key === s.key);
       if (slot !== -1) return { ...FUEL_SLOTS[slot], values: s.values, rank: slot };
       if (/battery|bess/i.test(s.key)) {
-        return { key: s.key, label: s.key, ...BATTERY, values: s.values, rank: FUEL_SLOTS.length };
+        return { key: s.key, label: s.key, ...fuelColor(s.key), values: s.values, rank: FUEL_SLOTS.length };
       }
       const gray = OTHER_GRAYS[Math.min(grays, OTHER_GRAYS.length - 1)];
       grays += 1;

@@ -433,6 +433,24 @@ describe('/api/v2/generators', () => {
     const still = await env.DB.prepare('SELECT count(*) AS n FROM generators').first<{ n: number }>();
     expect(still?.n).toBe(350);
   });
+
+  // LAB-1702: the station map needs a per-DUID factor without a second
+  // round-trip. It joins from the CDEII table, so it is null-by-default and a
+  // `?duid=` filter must keep working — the two tables both have a `duid`
+  // column, which is exactly why this is a subquery and not a JOIN.
+  it('carries the CDEII emission factor, null when AEMO publishes none', async () => {
+    await env.DB.prepare('INSERT INTO emission_factors (duid, factor) VALUES (?, ?)').bind('BW01', 0.87).run();
+    try {
+      const rows = await (
+        await get('/api/v2/generators?duid=BAPS,BW01')
+      ).json<Array<GeneratorRow & { emissions_factor: number | null }>>();
+      const byDuid = new Map(rows.map((r) => [r.duid, r.emissions_factor]));
+      expect(byDuid.get('BW01')).toBe(0.87);
+      expect(byDuid.get('BAPS')).toBeNull();
+    } finally {
+      await env.DB.prepare('DELETE FROM emission_factors').run();
+    }
+  });
 });
 
 describe('routing', () => {

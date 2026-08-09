@@ -1,0 +1,234 @@
+{
+ "_note": "Captured slice of https://data.openelectricity.org.au/v4/facilities/au_facilities.json (2026-08-09), CC BY-NC 4.0 (c) Open Electricity. Six facilities chosen to exercise the snapshot build: multi-DUID coal, a battery whose AEMO DUID exists only as OE synthesised charge/discharge codes, a hybrid solar+battery site, one with no coordinates, and a non-NEM (WEM) facility that must not leak in. Descriptions and photos stripped - unused.",
+ "success": true,
+ "total_records": 6,
+ "data": [
+  {
+   "code": "BAYSW",
+   "name": "Bayswater",
+   "network_id": "NEM",
+   "network_region": "NSW1",
+   "wikipedia": "https://en.wikipedia.org/wiki/Bayswater_Power_Station",
+   "owners": [
+    {
+     "name": "AGL",
+     "website": "https://www.agl.com.au"
+    }
+   ],
+   "location": {
+    "type": "geopoint",
+    "lat": -32.394981,
+    "lng": 150.94949
+   },
+   "units": [
+    {
+     "code": "BW02",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "coal_black",
+     "status_id": "operating",
+     "capacity_registered": 660
+    },
+    {
+     "code": "BW01",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "coal_black",
+     "status_id": "operating",
+     "capacity_registered": 660
+    }
+   ]
+  },
+  {
+   "code": "BRDD",
+   "name": "Broadsound",
+   "network_id": "NEM",
+   "network_region": "QLD1",
+   "wikipedia": null,
+   "owners": [
+    {
+     "name": "Iberdrola",
+     "website": "https://www.iberdrola.com.au/"
+    }
+   ],
+   "location": {
+    "type": "geopoint",
+    "lat": -22.810001,
+    "lng": 149.36302
+   },
+   "units": [
+    {
+     "code": "BRDDSF01",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "solar_utility",
+     "status_id": "operating",
+     "capacity_registered": 368
+    },
+    {
+     "code": "0BRDDBESL1",
+     "dispatch_type": "LOAD",
+     "fueltech_id": "battery_charging",
+     "status_id": "operating",
+     "capacity_registered": 240
+    },
+    {
+     "code": "0BRDDBESG1",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "battery_discharging",
+     "status_id": "operating",
+     "capacity_registered": 240
+    }
+   ]
+  },
+  {
+   "code": "MREH",
+   "name": "Melbourne A1",
+   "network_id": "NEM",
+   "network_region": "VIC1",
+   "wikipedia": null,
+   "owners": [
+    {
+     "name": "Equis",
+     "website": "https://www.equis.com/"
+    }
+   ],
+   "location": {
+    "type": "geopoint",
+    "lat": -37.661157,
+    "lng": 144.726292
+   },
+   "units": [
+    {
+     "code": "0MREHAL1",
+     "dispatch_type": "LOAD",
+     "fueltech_id": "battery_charging",
+     "status_id": "operating",
+     "capacity_registered": 215.8
+    },
+    {
+     "code": "0MREHAG1",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "battery_discharging",
+     "status_id": "operating",
+     "capacity_registered": 215.8
+    }
+   ]
+  },
+  {
+   "code": "QP",
+   "name": "Quorn Park",
+   "network_id": "NEM",
+   "network_region": "NSW1",
+   "wikipedia": null,
+   "owners": [
+    {
+     "name": "Enel",
+     "website": "https://www.enel.com/"
+    }
+   ],
+   "location": {
+    "type": "geopoint",
+    "lat": -33.079517,
+    "lng": 148.089521
+   },
+   "units": [
+    {
+     "code": "QPSFB1",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "solar_utility",
+     "status_id": "operating",
+     "capacity_registered": 96
+    },
+    {
+     "code": "0QPSFBL2",
+     "dispatch_type": "LOAD",
+     "fueltech_id": "battery_charging",
+     "status_id": "operating",
+     "capacity_registered": 27
+    },
+    {
+     "code": "0QPSFBG2",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "battery_discharging",
+     "status_id": "operating",
+     "capacity_registered": 27
+    }
+   ]
+  },
+  {
+   "code": "0BOGGABRI",
+   "name": "Boggabri",
+   "network_id": "NEM",
+   "network_region": "NSW1",
+   "wikipedia": null,
+   "owners": [
+    {
+     "name": "CleanPeak Energy",
+     "website": "https://cleanpeakenergy.com.au/"
+    }
+   ],
+   "units": [
+    {
+     "code": "0BGSF1",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "solar_utility",
+     "status_id": "committed",
+     "capacity_registered": 4
+    },
+    {
+     "code": "0BGB1",
+     "dispatch_type": "BIDIRECTIONAL",
+     "fueltech_id": "battery",
+     "status_id": "committed",
+     "capacity_registered": 4
+    },
+    {
+     "code": "0BGG1",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "battery_discharging",
+     "status_id": "committed",
+     "capacity_registered": 4
+    },
+    {
+     "code": "0BGL1",
+     "dispatch_type": "LOAD",
+     "fueltech_id": "battery_charging",
+     "status_id": "committed",
+     "capacity_registered": 4
+    }
+   ]
+  },
+  {
+   "code": "KWINANA_ESR2",
+   "name": "Kwinana Battery 2",
+   "network_id": "WEM",
+   "network_region": "WEM",
+   "wikipedia": null,
+   "owners": [
+    {
+     "name": "Synergy",
+     "website": "https://www.synergy.net.au"
+    }
+   ],
+   "location": {
+    "type": "geopoint",
+    "lat": -32.202465,
+    "lng": 115.778452
+   },
+   "units": [
+    {
+     "code": "0KWINANA_ESR2G1",
+     "dispatch_type": "GENERATOR",
+     "fueltech_id": "battery_discharging",
+     "status_id": "operating",
+     "capacity_registered": 225
+    },
+    {
+     "code": "0KWINANA_ESR2L1",
+     "dispatch_type": "LOAD",
+     "fueltech_id": "battery_charging",
+     "status_id": "operating",
+     "capacity_registered": 225
+    }
+   ]
+  }
+ ]
+}
