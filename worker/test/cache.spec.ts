@@ -424,7 +424,7 @@ describe('compression — ByteStorage envelope', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('x-cache')).toBe('MISS');
     // A real refilled body, not the empty 200 the missing guard used to serve.
-    const generators = JSON.parse(await res.text()) as Array<{ duid: string }>;
+    const generators: Array<{ duid: string }> = JSON.parse(await res.text());
     expect(generators.length).toBeGreaterThan(0);
     expect(generators[0].duid).toBe('BAPS');
   });

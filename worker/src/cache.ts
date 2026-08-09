@@ -186,8 +186,10 @@ function isCachedResponse(value: unknown): value is CachedResponse {
   return (
     typeof value === 'object' &&
     value !== null &&
-    typeof (value as CachedResponse).body === 'string' &&
-    typeof (value as CachedResponse).expires === 'number'
+    'body' in value &&
+    typeof value.body === 'string' &&
+    'expires' in value &&
+    typeof value.expires === 'number'
   );
 }
 
