@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NEM fuel mix — grid-scale generation</title>
-  <meta name="description" content="What is Australia's National Electricity Market running on right now? Live fuel-mix from AEMO dispatch SCADA.">
+  <title>NEM fuel mix — generation incl. rooftop solar</title>
+  <meta name="description" content="What is Australia's National Electricity Market running on right now? Live fuel-mix from AEMO dispatch SCADA plus AEMO's rooftop solar estimate.">
   <script>
     // Theme boot before first paint: explicit choice wins, else OS preference.
     (() => {
@@ -26,7 +26,7 @@
         NEM <span class="font-normal text-base-content/70">fuel mix</span>
       </h1>
       <span class="text-[0.65rem] uppercase tracking-widest text-base-content/50">
-        AEMO dispatch SCADA &middot; 5-min
+        AEMO dispatch SCADA &middot; 5-min &middot; rooftop est. 30-min
       </span>
       <div class="ms-auto">
         <label class="btn btn-ghost btn-sm swap swap-rotate" aria-label="Toggle dark mode">
@@ -62,6 +62,11 @@
           Price
         </label>
       </nav>
+      <label class="flex cursor-pointer items-center gap-2 text-sm"
+             title="AEMO's 30-minute estimate of behind-the-meter rooftop PV. Off = grid-scale generation only.">
+        <input type="checkbox" class="toggle toggle-sm" id="rooftop-toggle" checked>
+        <span>Rooftop solar (est.)</span>
+      </label>
       <label class="ms-auto flex cursor-pointer items-center gap-2 text-sm">
         <input type="checkbox" class="toggle toggle-sm" id="intensity-toggle" checked>
         <span>Carbon intensity overlay</span>
@@ -72,7 +77,9 @@
       <div class="card-body gap-4 p-4 sm:p-6">
         <div class="flex flex-wrap items-baseline gap-x-6 gap-y-1">
           <div>
-            <p class="text-[0.65rem] uppercase tracking-widest text-base-content/50">
+            <!-- app.js rewrites this label per bucket: it states whether the
+                 rooftop estimate is in the number at that timestamp (LAB-1701). -->
+            <p class="text-[0.65rem] uppercase tracking-widest text-base-content/50" id="hero-total-label">
               Grid-scale generation, net
             </p>
             <p class="text-4xl font-semibold sm:text-5xl" id="hero-total" aria-live="polite">&mdash;</p>
@@ -105,13 +112,17 @@
         </div>
 
         <p class="text-xs text-base-content/60">
-          Grid-scale generation only &mdash; excludes rooftop solar, so this is neither demand
-          nor total supply. Values are net MW: storage draws below zero while charging.
-          Times are AEST (NEM market time, UTC+10, no DST); each point is the interval
-          ending at that time &mdash; 5-minute at 24H, stepping up to daily at longer ranges.
-          Overlays come from AEMO DispatchIS: price is the regional reference price (RRP,
-          $/MWh, on a symlog-style axis &mdash; negative prices are routine); demand is the
-          dispatch-run <code>TOTALDEMAND</code>, not measured operational demand.
+          Grid-scale generation (AEMO dispatch SCADA) plus rooftop solar as a band of its
+          own &mdash; rooftop is <strong class="font-semibold">AEMO&rsquo;s 30-minute estimate</strong>
+          of behind-the-meter PV, modelled rather than metered, published about half an hour
+          behind SCADA: the newest intervals show grid-scale only until the estimate lands
+          (the totals say which). Still not demand &mdash; behind-the-meter consumption keeps
+          supply and demand distinct. Values are net MW: storage draws below zero while
+          charging. Times are AEST (NEM market time, UTC+10, no DST); each point is the
+          interval ending at that time &mdash; 5-minute at 24H, stepping up to daily at longer
+          ranges. Overlays come from AEMO DispatchIS: price is the regional reference price
+          (RRP, $/MWh, on a symlog-style axis &mdash; negative prices are routine); demand is
+          the dispatch-run <code>TOTALDEMAND</code>, not measured operational demand.
         </p>
         <p class="text-xs text-base-content/60" id="intensity-note">
           <strong class="font-semibold">Carbon intensity is an estimate</strong>, computed from

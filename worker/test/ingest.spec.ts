@@ -1,6 +1,17 @@
 import { env } from 'cloudflare:test';
+import { strToU8, zipSync } from 'fflate';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DISPATCH_IS_FEED, extractZipFilenames, fetchNemweb, loadDuidMap, upsertDispatchRows, upsertValues } from '../src/ingest';
+import {
+  DISPATCH_IS_FEED,
+  extractZipFilenames,
+  fetchNemweb,
+  loadDuidMap,
+  ROOFTOP_FEED,
+  runIngest,
+  upsertDispatchRows,
+  upsertRooftopRows,
+  upsertValues,
+} from '../src/ingest';
 
 describe('upsertValues', () => {
   it('is idempotent: inserting the same key twice leaves one row, last value wins', async () => {
@@ -122,6 +133,113 @@ describe('DISPATCH_IS_FEED processor', () => {
       'SELECT (SELECT count(*) FROM dispatch_region) AS r, (SELECT count(*) FROM dispatch_interconnector) AS i',
     ).first<{ r: number; i: number }>();
     expect(counts).toEqual({ r: 1, i: 1 });
+  });
+});
+
+describe('upsertRooftopRows', () => {
+  beforeEach(async () => {
+    await env.DB.prepare('DELETE FROM rooftop_pv').run();
+  });
+
+  it('is idempotent: re-ingesting an interval overwrites power and quality, one row survives', async () => {
+    const row = { intervalTime: 1784901600, region: 'NSW1', power: 4188.5, quality: 1 };
+    await upsertRooftopRows(env.DB, [row]);
+    await upsertRooftopRows(env.DB, [{ ...row, power: 4200.1, quality: 0.7 }]);
+
+    const result = await env.DB.prepare(
+      'SELECT count(*) AS n, max(power) AS power, max(quality) AS quality FROM rooftop_pv WHERE interval_time = ?',
+    )
+      .bind(row.intervalTime)
+      .first<{ n: number; power: number; quality: number }>();
+    expect(result).toEqual({ n: 1, power: 4200.1, quality: 0.7 });
+  });
+
+  it('chunks large batches across the D1 bound-parameter limit and keeps null quality', async () => {
+    // 60 rows spans three 25-row chunks.
+    const rows = Array.from({ length: 60 }, (_, i) => ({
+      intervalTime: 1784901600 + i * 1800,
+      region: 'VIC1',
+      power: i,
+      quality: i === 0 ? null : 1,
+    }));
+    await upsertRooftopRows(env.DB, rows);
+    const result = await env.DB.prepare(
+      'SELECT count(*) AS n, sum(CASE WHEN quality IS NULL THEN 1 ELSE 0 END) AS nulls FROM rooftop_pv',
+    ).first<{ n: number; nulls: number }>();
+    expect(result).toEqual({ n: 60, nulls: 1 });
+  });
+});
+
+describe('ROOFTOP_FEED processor', () => {
+  it('parse throws on a CSV with no MEASUREMENT rows (format drift stays loud)', async () => {
+    const processor = await ROOFTOP_FEED.createProcessor(env);
+    expect(() => processor.parse('C,NEMP.WORLD,ROOFTOP_PV_ACTUAL_MEASUREMENT,AEMO\r\n', 'test')).toThrow(
+      /no MEASUREMENT/,
+    );
+  });
+
+  it('parse + store round-trips through D1', async () => {
+    await env.DB.prepare('DELETE FROM rooftop_pv').run();
+    const processor = await ROOFTOP_FEED.createProcessor(env);
+    const csv =
+      'I,ROOFTOP,ACTUAL,2,INTERVAL_DATETIME,REGIONID,POWER,QI,TYPE,LASTCHANGED\r\n' +
+      'D,ROOFTOP,ACTUAL,2,"2026/08/09 07:30:00",NSW1,302.483,1,MEASUREMENT,"2026/08/09 07:49:02"\r\n' +
+      'D,ROOFTOP,ACTUAL,2,"2026/08/09 07:30:00",VIC1,0.953,1,MEASUREMENT,"2026/08/09 07:49:03"\r\n';
+    const { batch, rows, intervals } = processor.parse(csv, 'test');
+    expect(rows).toBe(2);
+    expect(intervals.size).toBe(1);
+    expect(await processor.store([batch])).toBe(2);
+    const count = await env.DB.prepare('SELECT count(*) AS n FROM rooftop_pv').first<{ n: number }>();
+    expect(count?.n).toBe(2);
+  });
+});
+
+describe('runIngest — ROOFTOP_FEED CURRENT filter', () => {
+  let routes: Map<string, () => Response>;
+  beforeEach(async () => {
+    await env.DB.batch([env.DB.prepare('DELETE FROM rooftop_pv'), env.DB.prepare('DELETE FROM scrape')]);
+    const archived = await env.ARCHIVE.list({ prefix: 'current/' });
+    await Promise.all(archived.objects.map((o) => env.ARCHIVE.delete(o.key)));
+    routes = new Map();
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL): Promise<Response> => {
+      const url = input instanceof Request ? input.url : String(input);
+      const handler = routes.get(url);
+      // Unrouted URLs throw — the SATELLITE assertion below is a real proof
+      // that the file was never fetched, not absence of evidence.
+      if (!handler) throw new Error(`unexpected fetch: ${url}`);
+      return handler();
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('ingests MEASUREMENT files and never touches the SATELLITE variants sharing the folder', async () => {
+    const listingUrl = ROOFTOP_FEED.currentListingUrl;
+    const measurement = 'PUBLIC_ROOFTOP_PV_ACTUAL_MEASUREMENT_20260809080000_0000000531718665.zip';
+    const satellite = 'PUBLIC_ROOFTOP_PV_ACTUAL_SATELLITE_20260809080000_0000000531718667.zip';
+    routes.set(
+      listingUrl,
+      () =>
+        new Response(
+          `<pre><A HREF="/Reports/Current/ROOFTOP_PV/ACTUAL/${measurement}">${measurement}</A><br>` +
+            `<A HREF="/Reports/Current/ROOFTOP_PV/ACTUAL/${satellite}">${satellite}</A><br></pre>`,
+          { headers: { 'content-type': 'text/html' } },
+        ),
+    );
+    const csv =
+      'I,ROOFTOP,ACTUAL,2,INTERVAL_DATETIME,REGIONID,POWER,QI,TYPE,LASTCHANGED\r\n' +
+      'D,ROOFTOP,ACTUAL,2,"2026/08/09 07:30:00",NSW1,302.483,1,MEASUREMENT,"2026/08/09 07:49:02"\r\n';
+    routes.set(`${listingUrl}${measurement}`, () => new Response(zipSync({ 'roof.CSV': strToU8(csv) })));
+    // No route for the SATELLITE zip: fetching it would throw and fail the run.
+
+    await runIngest(env, ROOFTOP_FEED);
+
+    const count = await env.DB.prepare('SELECT count(*) AS n FROM rooftop_pv').first<{ n: number }>();
+    expect(count?.n).toBe(1);
+    const ledger = (
+      await env.DB.prepare('SELECT filename FROM scrape ORDER BY filename').all<{ filename: string }>()
+    ).results.map((r) => r.filename);
+    expect(ledger).toEqual([measurement]); // SATELLITE never fetched, never ledgered
+    expect(await env.ARCHIVE.head(`current/${measurement}`)).not.toBeNull();
   });
 });
 

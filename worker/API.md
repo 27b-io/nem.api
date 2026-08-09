@@ -16,9 +16,11 @@ silently coerced.
 - Values are AEMO Dispatch **`UNIT_SCADA`** readings: instantaneous MW per
   dispatch unit (DUID) every 5 minutes.
 - **The numbers are grid-scale generation — NOT demand and NOT total
-  supply.** Rooftop solar is behind-the-meter and absent from Dispatch SCADA,
-  so stack heights understate total supply by the (large, growing) rooftop
-  amount. Do not label a stacked total as "demand".
+  supply.** Rooftop solar is behind-the-meter and absent from Dispatch SCADA;
+  it is served separately as `/api/v2/rooftop` (AEMO's 30-minute **estimate**,
+  not SCADA telemetry — see that section). Even combined, generation ≠
+  demand: behind-the-meter consumption keeps supply and demand distinct
+  series. Do not label a stacked total as "demand".
 - **Values are NET MW.** Storage charging and station load draw come through
   as negative values and are preserved: aggregates `SUM()` them net, so a
   fuel band can legitimately go negative (e.g. batteries charging). Stacked
@@ -258,6 +260,53 @@ What the data is:
   is a later epic candidate; the shape here would be a new field, not a
   breaking change.
 - `null` = no ingested sample in that bucket, same as `values`.
+
+## `GET /api/v2/rooftop`
+
+Per-region **rooftop solar PV generation** from AEMO `ROOFTOP_PV/ACTUAL`
+(`ROOFTOP,ACTUAL` POWER, `TYPE=MEASUREMENT` rows only), bucketed onto the
+same shared time axis as `values`. Feeds the dashboard's rooftop band.
+
+Same time-window, `resolution`, `limit`/`offset` grammar and period-ending
+NEM-time bucket alignment as `values`; same filter surface as `dispatch`
+(only `region`/`state`, no `group_by`, no `sort`).
+
+```jsonc
+{
+  "start": 1784901600,
+  "end": 1784905200,
+  "resolution": 1800,
+  "truncated": false,
+  "timestamps": [1784903400, 1784905200],
+  "series": [
+    {
+      "region": "NSW1",
+      "power": [4188.5, 4201.2]  // mean estimated rooftop PV over the bucket, MW
+    }
+  ]
+}
+```
+
+What the data is:
+
+- **An AEMO estimate, not SCADA telemetry.** Rooftop PV is behind-the-meter
+  and unmetered at dispatch granularity; AEMO models it per region every
+  30 minutes (`MEASUREMENT` methodology — the alternative `SATELLITE`
+  estimate is not ingested). Treat the numbers as modelled, not measured.
+- **The source is 30-minute and publishes ~30 minutes late.** The estimate
+  for the half-hour ending `T` is published around `T + 30 min`, so the most
+  recent 30–60 minutes of any window have **no bucket at all**. Absent
+  buckets are absent (or `null` against other regions' buckets) — never
+  zero, never interpolated. A consumer aligning rooftop with `values` must
+  render the unpublished live edge as missing, not as 0 MW.
+- At `resolution=300` buckets land only on half-hour boundaries (the
+  response is sparse, not dense); at 1800 it is the native series; coarser
+  buckets are the mean of the 30-minute estimates inside them.
+- Values are non-negative (generation only — there is no "charging" state);
+  a true `0` is a reading (night), distinct from a missing estimate.
+- AEMO's per-row quality indicator (`QI`, 0–1) is ingested and stored but
+  not exposed; exposing it later would be a new field, not a breaking
+  change.
 
 ## `GET /api/v2/intensity`
 

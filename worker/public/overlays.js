@@ -28,10 +28,69 @@ export const OVERLAY_INKS = {
  * Buckets are computed by the same server-side expression on both endpoints,
  * so equal windows yield equal timestamps; any bucket one payload has and the
  * other lacks (ingest lag skew) stays null rather than misaligning. */
+/* Project a /api/v2/rooftop payload (LAB-1701) onto the fuel-mix chart's
+ * time axis as one values array for the rooftop band.
+ *
+ * The source is 30-minute; the chart axis can be 5-minute. Each estimate is a
+ * mean MW over the half-hour ENDING at its timestamp, so every chart bucket
+ * inside that half-hour carries the estimate (piecewise-constant — the
+ * standard rendering of a period mean, not interpolation). A chart bucket
+ * whose covering half-hour has NO published estimate stays null — never zero
+ * — which is what renders the live edge (AEMO publishes ~30 min behind
+ * SCADA) and any interior gap as honestly absent. At chart resolutions
+ * ≥ 30 min both endpoints bucket identically and the covering lookup
+ * degenerates to an exact timestamp join.
+ *
+ * `region` follows the dashboard filter: '' (NEM-wide) sums the regions that
+ * have an estimate at that timestamp (same convention as demand above);
+ * null only when none do. */
+export function alignRooftop(chartTimestamps, chartResolution, rooftop, region) {
+  const values = new Array(chartTimestamps.length).fill(null);
+  if (
+    !rooftop ||
+    !Array.isArray(rooftop.timestamps) ||
+    rooftop.timestamps.length === 0 ||
+    !Array.isArray(rooftop.series)
+  ) {
+    return values;
+  }
+
+  const index = new Map(rooftop.timestamps.map((t, i) => [t, i]));
+  const selected = region ? rooftop.series.filter((s) => s.region === region) : rooftop.series;
+  // Buckets are period-ending and NEM-aligned (AEST +10). The covering step
+  // is the coarser of the chart's resolution and the native 30 minutes: the
+  // rooftop payload echoes the requested resolution even when its rows only
+  // exist on half-hour boundaries.
+  const step = Math.max(chartResolution, 1800);
+  const NEM_OFFSET = 36000;
+
+  chartTimestamps.forEach((t, out) => {
+    const i = index.get(Math.ceil((t + NEM_OFFSET) / step) * step - NEM_OFFSET);
+    if (i === undefined) return;
+    let sum = 0;
+    let saw = false;
+    for (const s of selected) {
+      const v = s.power?.[i];
+      if (v != null) {
+        sum += v;
+        saw = true;
+      }
+    }
+    if (saw) values[out] = sum;
+  });
+
+  return values;
+}
+
 export function alignOverlays(chartTimestamps, dispatch, region) {
   const price = new Array(chartTimestamps.length).fill(null);
   const demand = new Array(chartTimestamps.length).fill(null);
-  if (!dispatch || !Array.isArray(dispatch.timestamps) || dispatch.timestamps.length === 0) {
+  if (
+    !dispatch ||
+    !Array.isArray(dispatch.timestamps) ||
+    dispatch.timestamps.length === 0 ||
+    !Array.isArray(dispatch.series)
+  ) {
     return { price, demand };
   }
 
@@ -42,11 +101,11 @@ export function alignOverlays(chartTimestamps, dispatch, region) {
   chartTimestamps.forEach((t, out) => {
     const i = index.get(t);
     if (i === undefined) return;
-    if (single) price[out] = single.price[i] ?? null;
+    if (single) price[out] = single.price?.[i] ?? null;
     let sum = 0;
     let saw = false;
     for (const s of selected) {
-      const v = s.demand[i];
+      const v = s.demand?.[i];
       if (v != null) {
         sum += v;
         saw = true;

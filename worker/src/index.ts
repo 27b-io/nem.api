@@ -1,7 +1,7 @@
 import { BACKFILL_CRON, runBackfill } from './backfill';
 import { handleApiCached } from './cache';
 import { CDEII_CRON, refreshCdeii } from './cdeii';
-import { DISPATCH_IS_FEED, type Feed, runIngest, SCADA_FEED } from './ingest';
+import { DISPATCH_IS_FEED, type Feed, ROOFTOP_FEED, runIngest, SCADA_FEED } from './ingest';
 
 // NOTE: this module must export NOTHING but the default handler. workerd reads
 // every named export of the entrypoint as an entry in the Worker's handler map
@@ -45,7 +45,8 @@ export default {
   // emissions refresh, anything else the 5-minute CURRENT ingests — so a
   // drifted expression degrades to extra idempotent ingest runs, never a
   // silent no-op handler.
-  // Both feeds (SCADA, DispatchIS — LAB-1700) run sequentially per invocation
+  // All feeds (SCADA, DispatchIS — LAB-1700, rooftop PV — LAB-1701) run
+  // sequentially per invocation
   // with per-feed isolation: one feed's run-level failure (e.g. its listing
   // fetch) must not starve the other, but is still rethrown afterwards so the
   // invocation shows failed in the dashboard — the next run catches up
@@ -72,7 +73,7 @@ export default {
         : [`ingest:${feed.label}`, () => runIngest(env, feed)];
     }
     let firstError: unknown;
-    for (const [label, run] of [entry(SCADA_FEED), entry(DISPATCH_IS_FEED)]) {
+    for (const [label, run] of [entry(SCADA_FEED), entry(DISPATCH_IS_FEED), entry(ROOFTOP_FEED)]) {
       try {
         await run();
       } catch (err) {

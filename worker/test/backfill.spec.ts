@@ -1,8 +1,8 @@
 import { env } from 'cloudflare:test';
 import { strToU8, zipSync } from 'fflate';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ingestDaily, runBackfill } from '../src/backfill';
-import { DISPATCH_IS_FEED, SCADA_FEED } from '../src/ingest';
+import { ingestBundle, runBackfill } from '../src/backfill';
+import { DISPATCH_IS_FEED, ROOFTOP_FEED, SCADA_FEED } from '../src/ingest';
 
 // Tests run in the same isolate as the code under test, so stubbing global
 // fetch covers the module's outbound HTTP (bindings like D1/R2 don't route
@@ -19,6 +19,7 @@ beforeEach(async () => {
     env.DB.prepare('DELETE FROM scada_intervals'),
     env.DB.prepare('DELETE FROM dispatch_region'),
     env.DB.prepare('DELETE FROM dispatch_interconnector'),
+    env.DB.prepare('DELETE FROM rooftop_pv'),
     env.DB.prepare('DELETE FROM scrape'),
   ]);
   const archived = await env.ARCHIVE.list({ prefix: 'archive/' });
@@ -264,7 +265,91 @@ describe('runBackfill — DispatchIS feed (LAB-1700)', () => {
   });
 });
 
-describe('ingestDaily', () => {
+describe('runBackfill — rooftop PV feed (LAB-1701)', () => {
+  const ROOF_LISTING = 'https://nemweb.com.au/Reports/Archive/ROOFTOP_PV/ACTUAL/';
+
+  function rooftopCsv(date: string, halfHour: number): string {
+    const mins = (halfHour + 1) * 30;
+    const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+    const mm = String(mins % 60).padStart(2, '0');
+    const ts = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6, 8)} ${hh}:${mm}:00`;
+    return [
+      `C,NEMP.WORLD,ROOFTOP_PV_ACTUAL_MEASUREMENT,AEMO,PUBLIC,${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6, 8)},00:00:00,1,DEMAND,1`,
+      'I,ROOFTOP,ACTUAL,2,INTERVAL_DATETIME,REGIONID,POWER,QI,TYPE,LASTCHANGED',
+      `D,ROOFTOP,ACTUAL,2,"${ts}",NSW1,300.5,1,MEASUREMENT,"${ts}"`,
+      `D,ROOFTOP,ACTUAL,2,"${ts}",VIC1,120.25,0.7,MEASUREMENT,"${ts}"`,
+      '',
+    ].join('\r\n');
+  }
+
+  /** Weekly bundle shape: inner half-hour zips across several days, two levels like the daily feeds. */
+  function buildRooftopWeekly(dates: string[], halfHoursPerDay: number): Uint8Array {
+    const inner: Record<string, Uint8Array> = {};
+    for (const date of dates) {
+      for (let i = 0; i < halfHoursPerDay; i++) {
+        const mins = (i + 1) * 30;
+        const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+        const mm = String(mins % 60).padStart(2, '0');
+        const name = `PUBLIC_ROOFTOP_PV_ACTUAL_MEASUREMENT_${date}${hh}${mm}00_000000000000${String(i).padStart(4, '0')}`;
+        inner[`${name}.zip`] = zipSync({ [`${name}.CSV`]: strToU8(rooftopCsv(date, i)) });
+      }
+    }
+    return zipSync(inner);
+  }
+
+  it('ingests a weekly rooftop bundle end to end: D1 rows, R2 raw zip, ledger', async () => {
+    const bundle = 'PUBLIC_ROOFTOP_PV_ACTUAL_MEASUREMENT_20260101.zip';
+    routes.set(ROOF_LISTING, () => new Response(
+      `<html><body><pre><A HREF="/Reports/Archive/ROOFTOP_PV/ACTUAL/${bundle}">${bundle}</A><br>` +
+        // SATELLITE weekly bundle on the same listing must be ignored outright.
+        '<A HREF="/Reports/Archive/ROOFTOP_PV/ACTUAL/PUBLIC_ROOFTOP_PV_ACTUAL_SATELLITE_20260101.zip">sat</A><br>' +
+        '</pre></body></html>',
+      { headers: { 'content-type': 'text/html' } },
+    ));
+    routes.set(`${ROOF_LISTING}${bundle}`, () => new Response(buildRooftopWeekly(['20260101', '20260102'], 3)));
+
+    const run = await runBackfill(env, ROOFTOP_FEED);
+    // 2 days × 3 half-hours × 2 regions.
+    expect(run).toEqual({ ok: 1, failed: 0, values: 12, remaining: 0 });
+
+    // "2026/01/01 00:30:00" NEM market time (UTC+10), period-ending.
+    const expected = Date.UTC(2026, 0, 1, 0, 30, 0) / 1000 - 10 * 3600;
+    const nsw = await env.DB.prepare(
+      "SELECT power, quality FROM rooftop_pv WHERE interval_time = ? AND region = 'NSW1'",
+    )
+      .bind(expected)
+      .first<{ power: number; quality: number }>();
+    expect(nsw).toEqual({ power: 300.5, quality: 1 });
+
+    expect(await env.ARCHIVE.head(`archive/${bundle}`)).not.toBeNull();
+    expect(await ledgerFilenames()).toEqual([bundle]);
+  });
+
+  it("rooftop's ledger range never masks, or is masked by, the other feeds' bundles", async () => {
+    // Same-date bundles from both other feeds land inside the rooftop range
+    // scan bounds; the per-feed GLOB keeps all three apart.
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO scrape (filename, ingested_at) VALUES ('PUBLIC_DISPATCHSCADA_20260101.zip', 1)"),
+      env.DB.prepare("INSERT INTO scrape (filename, ingested_at) VALUES ('PUBLIC_DISPATCHIS_20260101.zip', 1)"),
+    ]);
+    const bundle = 'PUBLIC_ROOFTOP_PV_ACTUAL_MEASUREMENT_20260101.zip';
+    routes.set(ROOF_LISTING, () => new Response(
+      `<html><body><pre><A HREF="/Reports/Archive/ROOFTOP_PV/ACTUAL/${bundle}">${bundle}</A><br></pre></body></html>`,
+      { headers: { 'content-type': 'text/html' } },
+    ));
+    routes.set(`${ROOF_LISTING}${bundle}`, () => new Response(buildRooftopWeekly(['20260101'], 2)));
+
+    const run = await runBackfill(env, ROOFTOP_FEED);
+    expect(run.ok).toBe(1);
+    expect(await ledgerFilenames()).toEqual([
+      'PUBLIC_DISPATCHIS_20260101.zip',
+      'PUBLIC_DISPATCHSCADA_20260101.zip',
+      bundle,
+    ]);
+  });
+});
+
+describe('ingestBundle', () => {
   it('tolerates a corrupt inner file: counts it, ingests the rest, still ledgers the day', async () => {
     const zip = zipSync({
       'PUBLIC_DISPATCHSCADA_202601010005_0000000000000001.zip': zipSync({
@@ -274,7 +359,7 @@ describe('ingestDaily', () => {
     });
     await env.ARCHIVE.put('archive/PUBLIC_DISPATCHSCADA_20260101.zip', zip);
 
-    const stats = await ingestDaily(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip');
+    const stats = await ingestBundle(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip');
     expect(stats).toMatchObject({ innerFiles: 2, skippedInner: 1, values: 2, intervals: 1, source: 'r2' });
     expect(await valueCount()).toBe(2);
     expect(await ledgerFilenames()).toEqual(['PUBLIC_DISPATCHSCADA_20260101.zip']);
@@ -288,7 +373,7 @@ describe('ingestDaily', () => {
     interceptDaily('20260101', zip);
 
     await expect(
-      ingestDaily(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip'),
+      ingestBundle(env, SCADA_FEED, await SCADA_FEED.createProcessor(env), 'PUBLIC_DISPATCHSCADA_20260101.zip'),
     ).rejects.toThrow(/no usable rows/);
     expect(await ledgerFilenames()).toEqual([]);
     expect(await env.ARCHIVE.head('archive/PUBLIC_DISPATCHSCADA_20260101.zip')).toBeNull();
