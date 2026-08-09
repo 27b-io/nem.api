@@ -224,6 +224,13 @@ function clampView(view) {
 }
 
 function setView(view) {
+  // A non-finite box paints a blank page rather than throwing, which is the
+  // worst way for a geometry mistake to present — it looks like a data
+  // problem. Fall back to the whole-NEM view and say so in the console.
+  if (![view.x, view.y, view.w, view.h].every(Number.isFinite)) {
+    console.error('station map: refusing a non-finite viewBox, falling back to the NEM view', view);
+    view = state.home;
+  }
   state.view = view;
   svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
   rescaleToScreenPixels();
@@ -657,12 +664,7 @@ async function boot() {
   // Deep links: /map.html?region=SA1&station=TORRB
   const params = new URLSearchParams(location.search);
   const region = params.get('region');
-  if (REGIONS.some(([id]) => id === region) && region) {
-    state.region = region;
-    renderRegionFilter();
-    paintMarkers();
-    setView(frame(regionBounds(region)));
-  }
+  if (region && REGIONS.some(([id]) => id === region)) setRegion(region);
   const station = params.get('station');
   if (station && state.byCode.has(station)) select(station);
 
