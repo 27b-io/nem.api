@@ -69,7 +69,11 @@
 
           <div id="map-wrap">
             <svg id="map" role="img" aria-label="Map of power stations in the National Electricity Market"></svg>
-            <button class="btn btn-ghost btn-xs" id="reset-view" type="button">Reset view</button>
+            <div id="map-controls" role="group" aria-label="Map zoom">
+              <button class="btn btn-xs" id="zoom-in" type="button" aria-label="Zoom in">+</button>
+              <button class="btn btn-xs" id="zoom-out" type="button" aria-label="Zoom out">&minus;</button>
+              <button class="btn btn-xs" id="reset-view" type="button">Reset view</button>
+            </div>
           </div>
 
           <div id="legend" class="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs"></div>
@@ -79,10 +83,11 @@
             into the station it belongs to. Marker colour is the station&rsquo;s largest fuel by
             registered capacity &mdash; the same palette as the fuel-mix chart; marker area
             scales with registered capacity, so a 2&nbsp;GW station covers a hundred times the
-            area of a 20&nbsp;MW one rather than a hundred times the width. Drag to pan;
-            <kbd>ctrl</kbd>/<kbd>&#8984;</kbd>&#8202;+&#8202;scroll to zoom, or pick a region
-            above. Grey jurisdictions (WA, NT) are separate grids and structurally outside
-            the NEM.
+            area of a 20&nbsp;MW one rather than a hundred times the width. Click a pin for the
+            station&rsquo;s details. Drag to pan; zoom with the <kbd>+</kbd>&thinsp;/&thinsp;<kbd>&minus;</kbd>
+            buttons, the scroll wheel, or a double-click, and pick a region above to jump
+            straight to it. Grey jurisdictions (WA, NT) are separate grids and structurally
+            outside the NEM.
           </p>
           <p class="text-xs text-base-content/60">
             <strong class="font-semibold">A NEM region is electrical, not geographic.</strong>

@@ -106,6 +106,38 @@ details, the last 24 h of the station's own output as a sparkline over
 `/api/v2/values?duid=…`, its AEMO CDEII emission factor, and an estimated
 emissions rate at current output. Deep-linkable: `/map?region=SA1&station=TORRB`.
 
+### Interaction, and how to verify it
+
+Click a pin for its details. Pan by dragging; zoom with the on-map `+` / `−`
+buttons, the scroll wheel (no modifier), or a double-click; the region buttons
+jump straight to a region. The map box is capped at `min(62vh, 34rem)` and the
+viewBox is fitted to *it* (`boxAspect()`), never the reverse — a viewBox whose
+aspect differs from the box letterboxes under `preserveAspectRatio` and silently
+offsets every pointer coordinate. The cap is also what makes an unmodified wheel
+zoom acceptable: there is always page above and below the map to scroll past it.
+
+**Interaction here needs a real browser with real pointer events.** Two bugs
+shipped past a DOM-assertion check that reported 213 markers with correct classes
+and no console errors:
+
+- `svg.setPointerCapture()` in the drag handler retargeted the subsequent
+  `pointerup` *and* `click` to the `<svg>`, so a marker's own click listener
+  never fired and **clicking a station did nothing**. The drag now tracks
+  `pointermove`/`pointerup` on `window` instead, which buys the same
+  keep-panning-outside-the-element behaviour without touching event targeting.
+  Never reintroduce pointer capture on the map root.
+- the drag threshold was 0.2% of the viewBox width — under two screen pixels at
+  the whole-NEM view — so the hand tremor in an ordinary click registered as a
+  drag and the click was suppressed. It is now 4 CSS pixels.
+
+A synthetic `click` dispatched on a node (lightpanda, `element.click()`) does
+**not** exercise `pointerdown` → capture → `click` retargeting, which is exactly
+why both survived. Verify map interaction with playwright-core driving the system
+Chrome (`executablePath: /usr/bin/google-chrome`) and `page.mouse.*`, and
+screenshot it: an SVG geometry bug paints a blank or distorted map while every
+DOM assertion passes. This is not wired into CI — it needs a browser dependency
+the Worker does not otherwise carry.
+
 Shared page chrome (`$`, `fetchJson`, `showError`, `REGIONS`, `TZ`, the theme
 toggle) lives in `public/chrome.js` and is imported by both pages; the theme
 callback is the parameter because the chart repaints a canvas and the map
