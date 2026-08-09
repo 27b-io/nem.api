@@ -24,6 +24,10 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const LABEL_PX = 13; // jurisdiction label size, in screen pixels
 const DISPATCH_INTERVAL = 300; // seconds; the NEM dispatch cadence
 const FRAME_MARGIN = 0.06; // breathing room around a framed region
+// Marker floor in screen pixels. Not a scale point — a 20 kW rooftop array and
+// a 2.9 GW coal station both have to be hittable, and a 3 px dot is not: it is
+// a 6 px target, under half the ~24 px a pointer can reliably acquire.
+const MIN_MARKER_PX = 4.5;
 
 const fmtMW = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
 const fmtMW1 = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 1 });
@@ -47,6 +51,7 @@ const state = {
   selected: null,
   view: null,
   home: null,
+  bounds: null,
   detailToken: 0,
 };
 
@@ -119,11 +124,24 @@ function frame(bounds, aspect) {
   return { x: cx - w / 2, y: cy - h / 2, w, h };
 }
 
+/** The map box's aspect, from real layout. clientToUser assumes the viewBox
+ *  aspect matches it exactly — any mismatch and preserveAspectRatio letterboxes,
+ *  which silently offsets every coordinate the pointer produces. So the box is
+ *  sized by CSS and the viewBox is fitted to IT, never the other way round. */
+function boxAspect() {
+  // Floors would DEFEAT the point: `height: min(62vh, 34rem)` renders under
+  // 240 px on a viewport shorter than ~387 px (a landscape phone), and a
+  // floored height computes an aspect the element does not have — which is
+  // exactly the letterboxing this function exists to prevent. Only a zero
+  // dimension (no layout yet) gets a fallback, and 4/3 is just something
+  // finite to survive on until the resize listener supplies the truth.
+  const { clientWidth: w, clientHeight: h } = svg;
+  return w > 0 && h > 0 ? w / h : 4 / 3;
+}
+
 function renderBasemap(basemap) {
-  const all = basemap.regions.flatMap((r) => r.rings);
-  const bounds = ringBounds(all);
-  state.home = frame(bounds, (bounds.maxX - bounds.minX) / (bounds.maxY - bounds.minY));
-  svg.style.aspectRatio = String(state.home.w / state.home.h);
+  state.bounds = ringBounds(basemap.regions.flatMap((r) => r.rings));
+  state.home = frame(state.bounds, boxAspect());
 
   const land = document.createElementNS(SVG_NS, 'g');
   const labels = document.createElementNS(SVG_NS, 'g');
@@ -169,7 +187,7 @@ function renderMarkers() {
     circle.setAttribute('cx', x.toFixed(4));
     circle.setAttribute('cy', y.toFixed(4));
     circle.setAttribute('class', 'marker');
-    circle.dataset.px = String(markerRadius(station.capacity, maxCapacity));
+    circle.dataset.px = String(markerRadius(station.capacity, maxCapacity, MIN_MARKER_PX));
     circle.dataset.code = station.code;
     circle.append(titleNode(`${station.name} — ${fmtMW.format(station.capacity)} MW ${station.fuel || 'unspecified'}`));
     circle.addEventListener('click', () => select(station.code));
@@ -197,11 +215,12 @@ function paintMarkers() {
  *  renders about 150 px tall and swallows the continent. Both are converted on
  *  every view change, which is also what keeps a pin a pin at any zoom. */
 function rescaleToScreenPixels() {
-  // Floored at the narrowest real viewport. A zero or near-zero here means the
-  // SVG has no usable layout yet — booted in a background tab, in a hidden
-  // container, or under a headless engine — and dividing by it scales every
-  // marker by most of the viewBox and paints the map solid. The resize
-  // listener corrects the figure the moment real layout happens.
+  // Floored at the narrowest real viewport. Unlike boxAspect() above, a floor
+  // is safe here: this is a per-marker SIZE, not a ratio the viewBox has to
+  // match, so a slightly-too-small pin on a 200 px viewport is cosmetic where a
+  // wrong aspect would misplace every click. A zero means no layout yet
+  // (background tab, hidden container, headless engine) and dividing by it
+  // scales every marker by most of the viewBox and paints the map solid.
   const width = Math.max(svg.clientWidth, 320);
   const k = state.view.w / width;
   for (const marker of state.markers.values()) {
@@ -221,6 +240,27 @@ function clampView(view) {
   const cx = Math.min(home.x + home.w, Math.max(home.x, view.x + view.w / 2));
   const cy = Math.min(home.y + home.h, Math.max(home.y, view.y + view.h / 2));
   return { ...view, x: cx - view.w / 2, y: cy - view.h / 2 };
+}
+
+/** Re-fit the whole-NEM view to the current box and correct the live view's
+ *  aspect so it keeps matching. Runs on resize.
+ *
+ *  The visitor's position is ALWAYS preserved — there is no "they were only
+ *  panned, so recentring is harmless" case. Someone who dragged to Tasmania at
+ *  full zoom-out has a view whose width still equals home's; snapping that back
+ *  to the centred continent on an orientation change throws away the only thing
+ *  they had done. Centre and width survive, only the height follows the new
+ *  aspect, and clampView keeps the result on the map. */
+function reframe() {
+  if (!state.bounds || !state.view) return;
+  const aspect = boxAspect();
+  state.home = frame(state.bounds, aspect);
+  const cx = state.view.x + state.view.w / 2;
+  const cy = state.view.y + state.view.h / 2;
+  // A narrower box can make the old width wider than the whole-NEM view.
+  const w = Math.min(state.view.w, state.home.w);
+  const h = w / aspect;
+  setView(clampView({ x: cx - w / 2, y: cy - h / 2, w, h }));
 }
 
 function setView(view) {
@@ -246,65 +286,119 @@ function clientToUser(clientX, clientY) {
   };
 }
 
+/** Zoom by `factor` about a user-space anchor, or about the view's centre. */
+function zoomBy(factor, anchor = null) {
+  // Never zoom out past the whole-NEM view; 60x in is about a suburb.
+  const w = Math.min(state.home.w, Math.max(state.home.w / 60, state.view.w * factor));
+  const scale = w / state.view.w;
+  const at = anchor ?? { x: state.view.x + state.view.w / 2, y: state.view.y + state.view.h / 2 };
+  setView(clampView({
+    x: at.x - (at.x - state.view.x) * scale,
+    y: at.y - (at.y - state.view.y) * scale,
+    w,
+    h: state.view.h * scale,
+  }));
+}
+
 function installPanZoom() {
+  // Plain wheel zooms — no modifier. An earlier revision required ctrl/⌘ to
+  // avoid swallowing page scroll, which Ray reported as painful, and he was
+  // right: no map on the web works that way. The scroll-trap it was guarding
+  // against is instead handled where it belongs, in CSS — the map is capped to
+  // a fraction of the viewport height (map.css), so there is always page above
+  // and below it to put the cursor on. The +/− buttons and double-click below
+  // mean the wheel is never the only way in.
   svg.addEventListener('wheel', (event) => {
-    // Zoom only on a modified wheel. The map is taller than most viewports, so
-    // swallowing every wheel event traps a visitor scrolling past it — they
-    // can never reach the legend, the caveats, or the licence attribution in
-    // the footer, which is the CC BY-NC compliance surface.
-    if (!event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
-    const anchor = clientToUser(event.clientX, event.clientY);
     // Continuous in deltaY so a trackpad's fine-grained events feel smooth and
     // a mouse notch still moves a useful amount.
-    const factor = Math.exp(event.deltaY * 0.0015);
-    // Never zoom out past the whole-NEM view; 60x in is about a suburb.
-    const w = Math.min(state.home.w, Math.max(state.home.w / 60, state.view.w * factor));
-    const scale = w / state.view.w;
-    setView(clampView({
-      x: anchor.x - (anchor.x - state.view.x) * scale,
-      y: anchor.y - (anchor.y - state.view.y) * scale,
-      w,
-      h: state.view.h * scale,
-    }));
+    zoomBy(Math.exp(event.deltaY * 0.0015), clientToUser(event.clientX, event.clientY));
   }, { passive: false });
 
+  /* Double-click zooms the BASEMAP only.
+   *
+   * Over a marker it does nothing: a pin is a target, and hitting it twice
+   * must not also move the map out from under the panel that just opened.
+   * Kody's suggested fix — setting suppressClick inside this handler — cannot
+   * work: the browser fires click, click, THEN dblclick, so both clicks have
+   * already been delivered by the time this runs and the flag would instead
+   * eat the next unrelated click. The second click is stopped by its own
+   * `detail` below, which is the only signal available while it is in flight. */
+  svg.addEventListener('dblclick', (event) => {
+    event.preventDefault();
+    if (event.target.classList.contains('marker')) return;
+    zoomBy(event.shiftKey ? 2 : 0.5, clientToUser(event.clientX, event.clientY));
+  });
+
+  /* Drag to pan.
+   *
+   * NO setPointerCapture here, deliberately. Capturing the pointer on the SVG
+   * retargets the subsequent `pointerup` AND `click` to the SVG itself, so a
+   * marker's own click listener never fires — which is exactly the bug Ray hit
+   * ("clicking on a station should show its details"). Verified with real
+   * pointer events: pointerdown arrived at the circle, click arrived at the
+   * svg. Capture only existed so a drag continuing outside the map kept
+   * panning; window-level move/up listeners buy the same thing without
+   * touching event targeting.
+   */
   let dragging = null;
-  // Set on pointerup when the pointer actually moved, consumed by the click
-  // that the browser fires straight afterwards — a drag that happens to end
-  // over a marker must not also open that station. Cleared on the next
-  // pointerdown too, so a drag that never produces a click (pointercancel,
-  // release outside the window) cannot eat an unrelated later click.
+  // Set on pointerup when the pointer genuinely moved, consumed by the click
+  // the browser fires straight afterwards — a drag that happens to end over a
+  // marker must not also open that station. Cleared on the next pointerdown so
+  // a drag that produces no click cannot eat an unrelated later one.
   let suppressClick = false;
+
   svg.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return; // left button only; right-click is the menu
     suppressClick = false;
-    dragging = { id: event.pointerId, ...clientToUser(event.clientX, event.clientY), moved: false };
-    svg.setPointerCapture(event.pointerId);
+    dragging = { id: event.pointerId, clientX: event.clientX, clientY: event.clientY, moved: false };
     svg.classList.add('dragging');
   });
-  svg.addEventListener('pointermove', (event) => {
+
+  // In CSS PIXELS, not user units. The old threshold was 0.2% of the viewBox
+  // width, which at the whole-NEM view is under two pixels — so the hand
+  // tremor in an ordinary click registered as a drag and the click was
+  // suppressed. 4 px is the conventional slop.
+  const DRAG_SLOP_PX = 4;
+
+  addEventListener('pointermove', (event) => {
     if (!dragging || event.pointerId !== dragging.id) return;
-    const now = clientToUser(event.clientX, event.clientY);
-    const dx = now.x - dragging.x;
-    const dy = now.y - dragging.y;
-    if (Math.abs(dx) + Math.abs(dy) > state.view.w * 0.002) dragging.moved = true;
+    if (Math.hypot(event.clientX - dragging.clientX, event.clientY - dragging.clientY) > DRAG_SLOP_PX) {
+      dragging.moved = true;
+    }
+    if (!dragging.moved) return; // don't nudge the view for a click's jitter
+    const rect = svg.getBoundingClientRect();
+    const dx = ((event.clientX - dragging.clientX) / rect.width) * state.view.w;
+    const dy = ((event.clientY - dragging.clientY) / rect.height) * state.view.h;
+    dragging.clientX = event.clientX;
+    dragging.clientY = event.clientY;
     setView(clampView({ ...state.view, x: state.view.x - dx, y: state.view.y - dy }));
   });
+
   const endDrag = (event) => {
     if (!dragging || event.pointerId !== dragging.id) return;
-    svg.releasePointerCapture(dragging.id);
     svg.classList.remove('dragging');
     suppressClick = dragging.moved;
     dragging = null;
   };
-  svg.addEventListener('pointerup', endDrag);
-  svg.addEventListener('pointercancel', endDrag);
+  addEventListener('pointerup', endDrag);
+  addEventListener('pointercancel', endDrag);
   svg.addEventListener('click', (event) => {
+    // detail > 1 is the second (or later) click of a multi-click. Letting it
+    // through would re-select the station and fire its 24-hour fetch a second
+    // time for one gesture.
+    if (event.detail > 1) {
+      event.stopPropagation();
+      return;
+    }
     if (!suppressClick) return;
     suppressClick = false;
     event.stopPropagation();
   }, true);
 
+  // Visible controls: the discoverable, keyboard-reachable way to zoom.
+  $('zoom-in').addEventListener('click', () => zoomBy(0.5));
+  $('zoom-out').addEventListener('click', () => zoomBy(2));
   $('reset-view').addEventListener('click', () => setRegion(''));
 }
 
@@ -668,9 +762,9 @@ async function boot() {
   const station = params.get('station');
   if (station && state.byCode.has(station)) select(station);
 
-  // The viewBox is in user units but marker radii are in screen pixels, so a
-  // resize changes the conversion factor.
-  addEventListener('resize', rescaleToScreenPixels);
+  // A resize changes two things: the px->user factor the markers are drawn
+  // with, and the box aspect the viewBox has to match.
+  addEventListener('resize', reframe);
 }
 
 $('error-retry').addEventListener('click', () => location.reload());

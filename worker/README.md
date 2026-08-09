@@ -106,13 +106,46 @@ details, the last 24 h of the station's own output as a sparkline over
 `/api/v2/values?duid=…`, its AEMO CDEII emission factor, and an estimated
 emissions rate at current output. Deep-linkable: `/map?region=SA1&station=TORRB`.
 
+### Interaction, and how to verify it
+
+Click a pin for its details. Pan by dragging; zoom with the on-map `+` / `−`
+buttons, the scroll wheel (no modifier), or a double-click on the basemap
+(shift+double-click zooms out); the region buttons jump straight to a region.
+Double-clicking a *pin* opens the station and does not zoom — a marker is a
+target, and hitting it twice must not move the map out from under the panel that
+just opened. A resize or orientation change keeps the visitor's centre and zoom;
+only the height follows the new aspect. The map box is capped at `min(62vh, 34rem)` and the
+viewBox is fitted to *it* (`boxAspect()`), never the reverse — a viewBox whose
+aspect differs from the box letterboxes under `preserveAspectRatio` and silently
+offsets every pointer coordinate. The cap is also what makes an unmodified wheel
+zoom acceptable: there is always page above and below the map to scroll past it.
+
+**Interaction here needs a real browser with real pointer events.** Two bugs
+shipped past a DOM-assertion check that reported 213 markers with correct classes
+and no console errors:
+
+- `svg.setPointerCapture()` in the drag handler retargeted the subsequent
+  `pointerup` *and* `click` to the `<svg>`, so a marker's own click listener
+  never fired and **clicking a station did nothing**. The drag now tracks
+  `pointermove`/`pointerup` on `window` instead, which buys the same
+  keep-panning-outside-the-element behaviour without touching event targeting.
+  Never reintroduce pointer capture on the map root.
+- the drag threshold was 0.2% of the viewBox width — under two screen pixels at
+  the whole-NEM view — so the hand tremor in an ordinary click registered as a
+  drag and the click was suppressed. It is now 4 CSS pixels.
+
+A synthetic `click` dispatched on a node (lightpanda, `element.click()`) does
+**not** exercise `pointerdown` → capture → `click` retargeting, which is exactly
+why both survived. Verify map interaction with playwright-core driving the system
+Chrome (`executablePath: /usr/bin/google-chrome`) and `page.mouse.*`, and
+screenshot it: an SVG geometry bug paints a blank or distorted map while every
+DOM assertion passes. This is not wired into CI — it needs a browser dependency
+the Worker does not otherwise carry.
+
 Shared page chrome (`$`, `fetchJson`, `showError`, `REGIONS`, `TZ`, the theme
 toggle) lives in `public/chrome.js` and is imported by both pages; the theme
 callback is the parameter because the chart repaints a canvas and the map
-recolours SVG fills. Neither page hijacks the scroll: the wheel only zooms with
-ctrl/⌘ held and `touch-action: pan-y` keeps vertical swipes scrolling, because
-the map is taller than most viewports and swallowing the wheel makes the
-attribution in the footer unreachable.
+recolours SVG fills.
 
 **No map library, no tile server.** The basemap is 2100 vertices of vendored
 public-domain geometry rendered as one SVG path per jurisdiction, pan/zoomed by
@@ -182,16 +215,16 @@ coordinate against the polygon of the region AEMO assigns it. On the
 outline. All seven exceptions were measured rather than waved away:
 
 - five sit **0.01–0.19 km** outside (Hume, Musselroe, ADP, Christies Beach,
-  Yarrawonga) — border and coastline generalisation at 1:50 m, sub-pixel at any
+  Yarrawonga) — border and coastline generalisation at 1:50 million, sub-pixel at any
   zoom this map offers;
 - Starfish Hill is 5.2 km out, at the tip of the Fleurieu Peninsula, which
-  1:50 m truncates;
+  1:50 million truncates;
 - **Murray is 11.8 km out, and correctly so.** A NEM region is an *electrical*
   region: Snowy's Murray Power Station stands in New South Wales and dispatches
   into `VIC1`. The pin is geographically right and the region is electrically
   right; they simply disagree, which is why the page says so out loud.
 
-Nothing here needs a finer basemap — 1:10 m is 40 MB of source for a
+Nothing here needs a finer basemap — 1:10 million is 40 MB of source for a
 correction smaller than a marker.
 
 The join itself is pure and unit-tested (`public/stations.js`,

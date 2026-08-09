@@ -63,14 +63,16 @@
 #map {
   display: block;
   width: 100%;
-  /* Australia is roughly 1.15:1 in Mercator; the box is set from the basemap's
-     own aspect at boot, this is just the pre-load reservation. */
-  aspect-ratio: 1.15;
+  /* A FIXED box, and the viewBox is fitted to it (map.js boxAspect) rather than
+     the reverse. Capped below the viewport on purpose: the wheel zooms without
+     a modifier, so there has to be page above and below the map for a visitor
+     to scroll past it — otherwise the wheel is a trap and the licence
+     attribution in the footer becomes unreachable. */
+  height: min(62vh, 34rem);
   /* pan-y, not none: horizontal drag pans the map while vertical swipes still
-     scroll the page. `none` would make a map taller than the phone screen a
-     dead end you cannot swipe past — the same trap the ctrl-to-zoom rule in
-     map.js avoids on the desktop wheel. Vertical map panning is the cost; the
-     region buttons reframe without it. */
+     scroll the page — the touch equivalent of the height cap above. Vertical
+     map panning is the cost; the region buttons and the +/- controls reframe
+     without needing it. */
   touch-action: pan-y;
   cursor: grab;
 }
@@ -78,10 +80,20 @@
   cursor: grabbing;
 }
 
-#reset-view {
+#map-controls {
   position: absolute;
   inset-block-start: 0.25rem;
   inset-inline-end: 0.25rem;
+  display: flex;
+  gap: 0.25rem;
+}
+/* Square, unambiguous +/- targets; "Reset view" keeps its label. */
+#zoom-in,
+#zoom-out {
+  inline-size: 1.75rem;
+  padding: 0;
+  font-size: 1rem;
+  line-height: 1;
 }
 
 .region {
