@@ -23,16 +23,11 @@
  * Known WARNs, both relieved by the always-visible readout values (the
  * mandated relief channel): solar #eda100 is 2.17:1 on white; fossil #8f4d0f
  * is 2.44:1 on the dark surface. */
+import { $, currentTheme, fetchJson, installTheme, REGIONS, showError, TZ } from './chrome.js';
 import { alignOverlays, alignRooftop, OVERLAY_INKS } from './overlays.js';
 import { buildStack, orderSeries, ROOFTOP_KEY } from './stacking.js';
 import { bucketLabel, DEFAULT_RANGE, RANGES, rangeQuery } from './ranges.js';
 
-const REGIONS = [
-  ['', 'NEM'], ['QLD1', 'QLD'], ['NSW1', 'NSW'],
-  ['VIC1', 'VIC'], ['SA1', 'SA'], ['TAS1', 'TAS'],
-];
-
-const TZ = 'Australia/Brisbane'; // NEM market time: AEST, UTC+10, never DST (not Sydney)
 const fmtMW = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
 const fmtPrice = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 2 });
 // The API publishes tCO2-e/MWh; gCO2-e/kWh is the same number x1000 and is what
@@ -50,7 +45,6 @@ const dollars = (v, fmt = fmtMW) => (v < 0 ? `-$${fmt.format(-v)}` : `$${fmt.for
 // -$60 trough both stay readable. Filtered to the visible range at render.
 const PRICE_SPLITS = [-30000, -10000, -3000, -1000, -300, -100, -30, 0, 30, 100, 300, 1000, 3000, 10000, 30000];
 
-const $ = (id) => document.getElementById(id);
 const chartEl = $('chart');
 
 /* dispatch = /api/v2/dispatch payload (all regions; sliced client-side), or
@@ -103,9 +97,6 @@ function intensityForRegion() {
   return values.some((v) => v != null) ? values : null;
 }
 
-function currentTheme() {
-  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
-}
 function chartTokens() {
   const style = getComputedStyle(document.documentElement);
   return {
@@ -467,20 +458,6 @@ function render() {
   renderReadout(null);
 }
 
-function showError(message) {
-  $('error-text').textContent = message;
-  $('error-alert').classList.remove('hidden');
-}
-
-async function fetchJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try { detail = (await res.json()).error ?? detail; } catch { /* non-JSON error body */ }
-    throw new Error(detail);
-  }
-  return res.json();
-}
 
 // All regions in one payload (it is 5 small series) so region switches
 // re-slice client-side; refetched alongside the aggregate so the two stay on
@@ -643,23 +620,8 @@ function initOverlays() {
 // Theme toggle: explicit choice persists; OS changes apply only while the
 // user hasn't chosen. Chart colours are canvas-baked, so re-render on switch.
 function initTheme() {
-  // A valid ?theme= is an explicit choice (it wins at boot) — the OS-change
-  // listener must respect it just like a saved toggle.
-  const queryTheme = new URLSearchParams(location.search).get('theme');
-  const queryExplicit = queryTheme === 'light' || queryTheme === 'dark';
-  const toggle = $('theme-toggle');
-  toggle.checked = currentTheme() === 'dark';
-  toggle.addEventListener('change', () => {
-    const theme = toggle.checked ? 'dark' : 'light';
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem('theme', theme);
-    renderChart();
-    renderReadout(null);
-  });
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-    if (queryExplicit || localStorage.getItem('theme')) return;
-    document.documentElement.dataset.theme = e.matches ? 'dark' : 'light';
-    toggle.checked = e.matches;
+  installTheme(() => {
+    // Chart colours are canvas-baked, so a theme switch is a repaint.
     renderChart();
     renderReadout(null);
   });
