@@ -398,7 +398,13 @@ then smoke-check `/health`. It needs two repo Actions secrets:
   identify the blocking service in zone Security → Events (the `cf-ray` from a
   failed run log looks it up directly), then tick only that product in the
   rule's "WAF components to skip" — do not select "All remaining custom rules"
-  or products that aren't doing the blocking. Place it above any custom rule
+  or products that aren't doing the blocking. Beware that the "All managed
+  rules" component is not per-product: ticking it skips the entire WAF
+  Managed Rules phase for matching requests. If the blocker is a managed
+  rule, leave it unticked and instead add a WAF exception (zone Security →
+  WAF → Managed rules → Add exception) that skips only the specific rule or
+  ruleset, matching the same host/path/header expression.
+  Place it above any custom rule
   that could match this request — a Skip does not suppress custom rules listed
   after it unless "All remaining custom rules" is ticked (which it must not
   be). All unrelated WAF, rate-limiting, and custom rules stay enabled,
