@@ -19,8 +19,9 @@
  *   - Never sleep. Wait on the observable thing the gesture causes.
  *   - Never assume which marker is where. Hit-test with `elementFromPoint`, so a
  *     facilities-snapshot refresh cannot silently turn an assertion into a no-op.
- *   - Make the gesture the code actually reacts to. `mouse.click()` emits no
- *     `pointermove`, so it cannot test a drag threshold from either side; a drag
+ *   - Make the gesture the code actually reacts to. `mouse.click()` never moves
+ *     while the button is down (its only `pointermove` lands before
+ *     `pointerdown`), so it cannot test a drag threshold from either side; a drag
  *     that ends somewhere the marker no longer is cannot test click suppression.
  *     Both of those passed against a deliberately broken map before they were
  *     rewritten to move the mouse the way a hand does.
@@ -168,12 +169,10 @@ async function openMap(page, crashes) {
       () =>
         document.querySelectorAll('circle.marker').length > 0 &&
         document.getElementById('map').hasAttribute('viewBox'),
-      null,
-      { timeout: 30_000 },
     );
   } catch {
     // The usual cause is a server with no seeded D1 (`npm run migrate:local`),
-    // which otherwise presents as an unexplained 30 s timeout.
+    // which otherwise presents as an unexplained timeout.
     const state = await page.evaluate(() => ({
       markers: document.querySelectorAll('circle.marker').length,
       viewBox: document.getElementById('map')?.getAttribute('viewBox') ?? null,
@@ -238,8 +237,9 @@ async function main() {
     //    drag threshold was 0.2% of the viewBox width — under two screen pixels
     //    at the whole-NEM view — so the jitter in an ordinary click registered as
     //    a drag and the click was suppressed. `mouse.click()` cannot catch that:
-    //    it emits no `pointermove` at all, so it passes at any threshold,
-    //    including a negative one. The movement has to be real and sub-slop.
+    //    it never moves between `pointerdown` and `pointerup`, so it passes at
+    //    any threshold, including a negative one. The movement has to be real,
+    //    button-down, and sub-slop.
     let small = null;
     await check('a click with a hand tremor still opens the smallest pin', async () => {
       assert(clicked, 'assertion 1 did not run, so there is no station to exclude');

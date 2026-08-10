@@ -172,8 +172,9 @@ adds about half a minute rather than two.
 Two rules for anything added to it. **No sleeps and no retries** — wait on the
 thing the gesture causes, and run the assertions exactly once, because a probe
 allowed to pass on its second attempt reports "flaky" as "green". And **make the
-gesture the code actually reacts to**: `mouse.click()` emits no `pointermove`, so
-it passes at any drag threshold including a negative one, and a drag released
+gesture the code actually reacts to**: `mouse.click()` never moves while the
+button is down (its only `pointermove` lands before `pointerdown`), so it passes
+at any drag threshold including a negative one, and a drag released
 where the marker no longer is proves nothing about click suppression. Both of
 those assertions were green against a deliberately broken map before they were
 rewritten to move the mouse the way a hand does; `worker/README.md` is not the
