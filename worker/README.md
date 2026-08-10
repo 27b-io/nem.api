@@ -120,7 +120,7 @@ aspect differs from the box letterboxes under `preserveAspectRatio` and silently
 offsets every pointer coordinate. The cap is also what makes an unmodified wheel
 zoom acceptable: there is always page above and below the map to scroll past it.
 
-**Interaction here needs a real browser with real pointer events.** Two bugs
+**Interaction here needs a real browser with real pointer events.** Four bugs
 shipped past a DOM-assertion check that reported 213 markers with correct classes
 and no console errors:
 
@@ -133,7 +133,10 @@ and no console errors:
 - the drag threshold was 0.2% of the viewBox width — under two screen pixels at
   the whole-NEM view — so the hand tremor in an ordinary click registered as a
   drag and the click was suppressed. It is now 4 CSS pixels.
-
+- double-clicking a *pin* zoomed the map out from under the panel it had just
+  opened, and the two clicks in the gesture each fired the 24-hour drill-down
+  fetch. Double-click now zooms the basemap only, and the capture-phase click
+  handler drops any click with `detail > 1`.
 - `boxAspect()` measured the box with `clientWidth`/`clientHeight`, which **round
   to whole pixels**, while `clientToUser()` converts with the fractional
   `getBoundingClientRect()`. A 236.4 px box read as 236 fitted the viewBox to an

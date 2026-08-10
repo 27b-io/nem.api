@@ -73,7 +73,17 @@ const geometry = (page) =>
     const svg = document.getElementById('map');
     const [x, y, w, h] = svg.getAttribute('viewBox').split(' ').map(Number);
     const rect = svg.getBoundingClientRect();
-    return { w, h, cx: x + w / 2, cy: y + h / 2, rect, box: rect.width / rect.height };
+    // Plain values only: a DOMRect's properties are prototype getters, and
+    // Playwright documents evaluate() returns as plain-serializable — 1.62.1
+    // happens to carry them across, but that is not a contract to lean on.
+    return {
+      w,
+      h,
+      cx: x + w / 2,
+      cy: y + h / 2,
+      rect: { width: rect.width, height: rect.height },
+      box: rect.width / rect.height,
+    };
   });
 
 /**
