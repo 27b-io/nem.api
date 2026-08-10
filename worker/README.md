@@ -134,13 +134,43 @@ and no console errors:
   the whole-NEM view — so the hand tremor in an ordinary click registered as a
   drag and the click was suppressed. It is now 4 CSS pixels.
 
+- `boxAspect()` measured the box with `clientWidth`/`clientHeight`, which **round
+  to whole pixels**, while `clientToUser()` converts with the fractional
+  `getBoundingClientRect()`. A 236.4 px box read as 236 fitted the viewBox to an
+  aspect the element does not have — the same letterbox as above, at 0.17%, on
+  any viewport where the height is not a whole number. Both must be the same
+  measurement or they disagree by construction.
+
 A synthetic `click` dispatched on a node (lightpanda, `element.click()`) does
-**not** exercise `pointerdown` → capture → `click` retargeting, which is exactly
-why both survived. Verify map interaction with playwright-core driving the system
-Chrome (`executablePath: /usr/bin/google-chrome`) and `page.mouse.*`, and
-screenshot it: an SVG geometry bug paints a blank or distorted map while every
-DOM assertion passes. This is not wired into CI — it needs a browser dependency
-the Worker does not otherwise carry.
+**not** exercise `pointerdown` → capture → `click` retargeting, does not hit-test
+through letterboxing, and never produces a `detail > 1` — which is exactly why
+all of them survived a check that reported 213 markers with the right classes and
+no console errors.
+
+**So a real browser moving a real mouse is a CI gate here**, not an optional
+local ritual. `test/pointer-probe.mjs` drives `/map` with `page.mouse.*` through
+playwright-core and asserts 12 things about the result: a click opens the station
+under the cursor (including the smallest pin on the map), `+`/`−`/wheel zoom,
+drag pans without stealing the click or changing the selection, a drag ending on
+a pin does not open it, the page still scrolls beside the map, double-clicking a
+pin opens it exactly once without zooming, the viewBox aspect matches the box,
+and a resize to a landscape-phone height keeps the centre, the zoom and the
+aspect. Every wait is on an observable condition — no sleeps, and **no retries**:
+a probe allowed to pass on the second attempt reports "flaky" as "green".
+
+```sh
+npx wrangler dev --local          # in one shell; the probe needs a server
+npm run probe:map                 # in another — PROBE_URL to point elsewhere
+PROBE_HEADED=1 npm run probe:map  # watch it drive
+```
+
+The browser is `playwright-core`'s own pinned chromium (`npx playwright-core
+install chromium`), not a system Chrome, so CI and your laptop run the same
+revision. In CI it is cached and the probe shares the `wrangler dev` the
+`/health` smoke check already boots; the whole gate costs well under a minute.
+Screenshots stay a manual diagnostic — an SVG geometry bug paints a blank or
+distorted map while every DOM assertion passes, and eyes are still the cheapest
+way to see that.
 
 Shared page chrome (`$`, `fetchJson`, `showError`, `REGIONS`, `TZ`, the theme
 toggle) lives in `public/chrome.js` and is imported by both pages; the theme
