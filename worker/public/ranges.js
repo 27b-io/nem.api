@@ -6,13 +6,17 @@
  * (≤3d → 5-min, ≤14d → 30-min, ≤90d → hourly, else daily). "All" is the full
  * 13-month D1 retention window. */
 
+// `days` ≈ the window's span in days — weather.js uses it to pick an
+// Open-Meteo endpoint. Approximate is fine there (a day either way just
+// shifts the archive window edge, never breaks the query), but it lives HERE
+// so a new range can't be added without declaring its weather window.
 export const RANGES = [
-  { key: '24h', label: '24H', query: 'hours=24' },
-  { key: '3d',  label: '3D',  query: 'days=3' },
-  { key: '7d',  label: '7D',  query: 'days=7' },
-  { key: '30d', label: '30D', query: 'days=30' },
-  { key: '1y',  label: '1Y',  query: 'months=12' },
-  { key: 'all', label: 'All', query: 'months=13' },
+  { key: '24h', label: '24H', query: 'hours=24', days: 1 },
+  { key: '3d',  label: '3D',  query: 'days=3',   days: 3 },
+  { key: '7d',  label: '7D',  query: 'days=7',   days: 7 },
+  { key: '30d', label: '30D', query: 'days=30',  days: 30 },
+  { key: '1y',  label: '1Y',  query: 'months=12', days: 366 },
+  { key: 'all', label: 'All', query: 'months=13', days: 396 },
 ];
 
 // Single source of truth: the default is whatever leads the table, and

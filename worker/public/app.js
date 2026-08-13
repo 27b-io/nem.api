@@ -27,6 +27,7 @@ import { $, currentTheme, fetchJson, installTheme, REGIONS, showError, TZ } from
 import { alignOverlays, alignRooftop, OVERLAY_INKS } from './overlays.js';
 import { buildStack, orderSeries, ROOFTOP_KEY } from './stacking.js';
 import { bucketLabel, DEFAULT_RANGE, RANGES, rangeQuery } from './ranges.js';
+import { WEATHER_INK, WEATHER_VARS, alignWeather, weatherEndpoint } from './weather.js';
 
 const fmtMW = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 0 });
 const fmtPrice = new Intl.NumberFormat('en-AU', { maximumFractionDigits: 2 });
@@ -74,11 +75,33 @@ const state = {
    * old grid-scale-only view one click away. */
   rooftop: null,
   showRooftop: true,
+  /* Weather overlay (LAB-1699): OFF by default (weatherVar null). One request
+   * fetches every variable (wind/temperature/irradiance) together, so
+   * switching which is drawn is a pure re-render, like the intensity toggle —
+   * only turning it on from off, or a region/range change, needs a fetch.
+   * weatherKey stamps which region|range the payload in `weather` answers, so
+   * a payload stranded by a failed load() can never be drawn against a newer
+   * selection. `weatherVarDef` is the resolved WEATHER_VARS entry, derived
+   * once per render like intensityInk (renderReadout runs per mousemove).
+   * Failure state is DERIVED (weatherFailed() below), never stored — a
+   * stored flag was wrong in both directions when toggles landed mid-load. */
+  weatherVar: null,
+  weather: null,
+  weatherKey: '',
+  weatherAligned: null,
+  weatherVarDef: null,
 };
 
 /** Price needs a single region — the NEM has no NEM-wide spot price. */
 const priceDrawable = () => state.overlays.price && state.region !== '';
 const overlaysWanted = () => state.overlays.price || state.overlays.demand;
+
+/** The selection the current weather payload would have to answer. */
+const weatherKey = () => `${state.region}|${state.range}`;
+/* Derived, not stored: a variable is selected but no payload is in hand.
+ * True while a fetch is in flight too, but the notice only paints when
+ * updateWeatherUi runs — which is always after the fetch settles. */
+const weatherFailed = () => state.weatherVar !== null && state.weather === null;
 
 /* Carbon intensity (LAB-1698) for the selected region, aligned to the fuel
  * payload's buckets by TIMESTAMP rather than by index: both endpoints are
@@ -195,6 +218,41 @@ function renderChart() {
     });
   }
 
+  // Weather overlay (LAB-1699): its own secondary scale, since units differ
+  // per variable (km/h / °C / W/m²) — only one is ever drawn, so one scale and
+  // one ink cover all three. Aligned once per render like the other
+  // overlays; renderReadout re-reads state.weatherAligned on every cursor
+  // move. Computed whenever a variable is selected even if the fetch hasn't
+  // landed (or failed) — alignWeather degrades a missing payload to an
+  // all-null array, which is what lets the readout show "—" instead of
+  // nothing at all.
+  const weatherVar = WEATHER_VARS.find((v) => v.key === state.weatherVar) ?? null;
+  state.weatherVarDef = weatherVar;
+  state.weatherAligned = weatherVar
+    ? alignWeather(state.payload.timestamps, state.payload.resolution, state.weather, weatherVar.key)
+    : null;
+  const weatherAxes = [];
+  if (state.weatherAligned) {
+    data.push(state.weatherAligned);
+    seriesOpts.push({
+      label: `${weatherVar.label} (${weatherVar.unit})`,
+      scale: 'weather',
+      stroke: WEATHER_INK[theme],
+      width: 2,
+      points: { show: false },
+    });
+    weatherAxes.push({
+      ...axis,
+      scale: 'weather',
+      side: 1,
+      size: 64,
+      grid: { show: false }, // the MW grid owns the plot; a third grid would lie
+      label: `${weatherVar.label} (${weatherVar.unit})`,
+      stroke: WEATHER_INK[theme],
+      values: (u, vals) => vals.map((v) => v.toFixed(weatherVar.decimals)),
+    });
+  }
+
   state.chart = new uPlot({
     width,
     height,
@@ -216,6 +274,15 @@ function renderChart() {
       // Anchored at zero: intensity is a magnitude against a carbon-free
       // floor, and an auto-zoomed baseline would exaggerate small swings.
       i: { range: (u, min, max) => [0, max > 0 ? max * 1.1 : 1] },
+      // Wind speed and irradiance are magnitudes (anchor at zero, same
+      // reasoning as intensity); temperature can go negative, so it gets
+      // ordinary padded auto-ranging instead.
+      weather: {
+        range: (u, min, max) =>
+          weatherVar?.key === 'temperature_2m'
+            ? [min - Math.abs(min || 1) * 0.1, max + Math.abs(max || 1) * 0.1]
+            : [0, max > 0 ? max * 1.1 : 1],
+      },
     },
     axes: [
       { ...axis, label: 'Time (AEST)', labelSize: 22 },
@@ -238,6 +305,7 @@ function renderChart() {
         values: (u, vals) => vals.map((v) => dollars(v)),
       },
       ...intensityAxes,
+      ...weatherAxes,
     ],
     cursor: { y: false, points: { show: false } },
     legend: { show: false },
@@ -326,18 +394,21 @@ function renderReadout(cursorIdx) {
     readout.append(row);
   }
 
-  // Overlay readout rows (LAB-1700): the same relief channel the fuel bands
-  // use — every hovered price/demand value is reachable without color.
-  if (state.aligned && (state.overlays.demand || priceDrawable())) {
+  // Overlay readout rows (LAB-1700, LAB-1699): the same relief channel the
+  // fuel bands use — every hovered price/demand/weather value is reachable
+  // without color. Weather only needs state.weatherAligned (set whenever a
+  // variable is selected, even mid-fetch or after a failure — a null entry
+  // there just reads "—", same as any other gap).
+  if ((state.aligned && (state.overlays.demand || priceDrawable())) || state.weatherAligned) {
     const overlays = state.aligned;
     const theme = currentTheme();
-    const addOverlayRow = (kind, label, text) => {
+    const addOverlayRow = (ink, label, text) => {
       const row = document.createElement('div');
       row.className = 'flex items-center gap-2';
       const swatch = document.createElement('span');
       // Line mark ⇒ line swatch (a short rule, not the area rect).
       swatch.className = 'inline-block h-1 w-3 shrink-0 rounded-sm';
-      swatch.style.backgroundColor = OVERLAY_INKS[kind][theme];
+      swatch.style.backgroundColor = ink;
       const name = document.createElement('span');
       name.className = 'truncate text-base-content/70';
       name.textContent = label;
@@ -350,13 +421,18 @@ function renderReadout(cursorIdx) {
     const divider = document.createElement('div');
     divider.className = 'mt-2 border-t border-base-300 pt-2 space-y-1';
     readout.append(divider);
-    if (priceDrawable()) {
+    if (overlays && priceDrawable()) {
       const v = overlays.price[idx];
-      addOverlayRow('price', 'Spot price ($/MWh)', v == null ? '—' : dollars(v, fmtPrice));
+      addOverlayRow(OVERLAY_INKS.price[theme], 'Spot price ($/MWh)', v == null ? '—' : dollars(v, fmtPrice));
     }
-    if (state.overlays.demand) {
+    if (overlays && state.overlays.demand) {
       const v = overlays.demand[idx];
-      addOverlayRow('demand', 'Demand (MW)', v == null ? '—' : fmtMW.format(v));
+      addOverlayRow(OVERLAY_INKS.demand[theme], 'Demand (MW)', v == null ? '—' : fmtMW.format(v));
+    }
+    if (state.weatherAligned) {
+      const wv = state.weatherVarDef; // resolved in renderChart, not per mousemove
+      const v = state.weatherAligned[idx];
+      addOverlayRow(WEATHER_INK[theme], `${wv.label} (${wv.unit})`, v == null ? '—' : v.toFixed(wv.decimals));
     }
   }
 }
@@ -466,6 +542,17 @@ function render() {
 // windows are what make the two endpoints' bucket axes equal.
 const fetchDispatch = (range) => fetchJson(`/api/v2/dispatch?${rangeQuery(range)}`);
 
+// Open-Meteo (LAB-1699), fetched client-side straight from the browser — no
+// worker proxy, keyless, CORS-open. One request carries every variable, so a
+// region/range change is the only thing that needs a refetch; switching
+// which variable is drawn is a pure re-render (see initWeatherOverlay).
+// The abort deadline is what keeps the isolation promise: .catch() isolates
+// REJECTION, but a blackholed third-party origin that never settles would
+// hang the load()'s Promise.all — and the fuel-mix chart with it. Our own
+// API fetches carry no deadline; only the origin we don't operate gets one.
+const fetchWeather = (range, region) =>
+  fetchJson(weatherEndpoint(range, region, Date.now()), { signal: AbortSignal.timeout(8000) });
+
 // Monotonic token so a slow, stale region response can never overwrite the
 // latest selection (or clear a newer request's busy state).
 let activeLoad = 0;
@@ -485,6 +572,7 @@ async function load(region, range) {
   chartEl.setAttribute('aria-busy', 'true');
   try {
     const wantedDispatch = overlaysWanted(); // sampled now: a toggle can land mid-flight
+    const wantedWeather = state.weatherVar !== null;
     // Overlay failures are isolated: an overlay that can't load must not take
     // the fuel mix with it — each degrades to a missing overlay and logs.
     // Intensity carries no region param — the endpoint always returns every
@@ -492,7 +580,7 @@ async function load(region, range) {
     // the same range query as the aggregate: intensityForRegion joins the two
     // payloads strictly by timestamp, and equal windows are what make their
     // bucket axes equal (same rule as fetchDispatch below).
-    const [payload, intensity, dispatch, rooftop] = await Promise.all([
+    const [payload, intensity, dispatch, rooftop, weather] = await Promise.all([
       fetchJson(url),
       fetch(`/api/v2/intensity?${rangeQuery(range)}`)
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
@@ -512,6 +600,11 @@ async function load(region, range) {
         console.error('rooftop-pv load failed:', err);
         return null;
       }),
+      // Weather (LAB-1699), region-specific unlike the others above — a
+      // region switch while the overlay is on refetches under this loadId.
+      wantedWeather
+        ? fetchWeather(range, region).catch((err) => { console.error('weather overlay refresh failed:', err); return null; })
+        : Promise.resolve(null),
     ]);
     if (loadId !== activeLoad) return;
     state.payload = payload;
@@ -522,6 +615,10 @@ async function load(region, range) {
     // any stale payload). An overlay toggled ON mid-flight fetches under this
     // same loadId; its result must not be clobbered by our null placeholder.
     if (wantedDispatch || !overlaysWanted()) state.dispatch = dispatch;
+    if (wantedWeather || state.weatherVar === null) {
+      state.weather = weather;
+      state.weatherKey = weatherKey();
+    }
     $('error-alert').classList.add('hidden');
     render();
   } catch (err) {
@@ -532,6 +629,9 @@ async function load(region, range) {
     if (loadId === activeLoad) {
       chartEl.classList.remove('opacity-50');
       chartEl.removeAttribute('aria-busy');
+      // In finally, not the success arm: a failed load must still clear a
+      // stale "weather unavailable" notice sitting beside the big banner.
+      updateWeatherUi();
     }
   }
 }
@@ -617,6 +717,50 @@ function initOverlays() {
   }
 }
 
+// Weather overlay (LAB-1699): a non-blocking notice + reverting the select
+// to "off" on failure, deliberately NOT the big fuel-mix error banner — an
+// Open-Meteo outage is not our data being down, and must not read as one.
+// The CC-BY attribution appears whenever the overlay has been switched on,
+// regardless of whether this particular fetch succeeded.
+function updateWeatherUi() {
+  $('weather-note').classList.toggle('hidden', !weatherFailed());
+  $('weather-attribution').classList.toggle('hidden', state.weatherVar === null);
+}
+
+function initWeatherOverlay() {
+  const select = $('weather-overlay');
+  select.innerHTML = '';
+  select.append(new Option('Weather: off', ''));
+  for (const v of WEATHER_VARS) select.append(new Option(v.label, v.key));
+
+  select.addEventListener('change', async () => {
+    state.weatherVar = select.value || null;
+    // Refetch when there is no payload OR the one in hand answers a different
+    // region|range — a payload stranded by a failed load() (its catch skips
+    // the weather assignment while the selection has already committed) must
+    // not be drawn against the newer selection. On failure the selection
+    // stays put (still "Wind speed", say) and weatherFailed() drives the
+    // notice — the notice replaces the drawn line, not the choice, so the
+    // next load() retries automatically instead of silently falling to off.
+    if (state.weatherVar && (!state.weather || state.weatherKey !== weatherKey())) {
+      const loadId = activeLoad; // bail if a region/range switch lands mid-fetch
+      try {
+        const weather = await fetchWeather(state.range, state.region);
+        if (loadId !== activeLoad) return;
+        state.weather = weather;
+        state.weatherKey = weatherKey();
+      } catch (err) {
+        console.error('weather overlay load failed:', err);
+        if (loadId !== activeLoad) return;
+        state.weather = null;
+      }
+    }
+    updateWeatherUi();
+    renderChart();
+    renderReadout(null);
+  });
+}
+
 // Theme toggle: explicit choice persists; OS changes apply only while the
 // user hasn't chosen. Chart colours are canvas-baked, so re-render on switch.
 function initTheme() {
@@ -664,4 +808,5 @@ initTheme();
   if (RANGES.some(({ key }) => key === range)) state.range = range;
 }
 initOverlays();
+initWeatherOverlay();
 load(state.region, state.range); // renders the filters as it commits
