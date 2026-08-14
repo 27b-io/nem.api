@@ -44,7 +44,16 @@ curl --fail --silent --show-error https://nem.27b.io/health | \
   jq -e '.status == "ok" and .generators > 0'
 curl --fail --silent --show-error "https://nem.27b.io/api/v2/values/aggregate?group_by=fuel&hours=1" | \
   jq -e '.timestamps != null and .series != null and (.series | length) > 0'
+curl --fail --silent --show-error "https://nem.27b.io/api/v2/rooftop?hours=6" | \
+  jq -e '[.series[].power[] | select(. != null)] | length > 0'
 ```
+
+The rooftop check is the canonical "not shipped dark" probe (LAB-1919), and its
+field name matters: rooftop series carry `power` — not the `values` key the
+`values` endpoints use — so a probe that reads the wrong field reports a false
+"all null" against a healthy feed. `hours=6` always spans published estimates
+(the feed lags wall clock by at most ~1 h), so zero non-null values here means
+ingest is genuinely dark, not just the live edge.
 
 If production misbehaves, remove the `routes` entry, deploy that change from
 the default branch, and confirm `https://nem.27b.io/health` no longer reaches
