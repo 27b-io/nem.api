@@ -1,0 +1,26 @@
+# Fast hygiene only. The heavy gates (typecheck, tests, generated-artifact
+# diffs, smoke) live in .github/workflows/ci.yml — hooks must stay
+# dependency-free because they fire in agent worktrees that may not have
+# node_modules installed.
+#
+# Excluded from all hooks:
+#   api/ config/ dist/ src/ tests/  — the 2015 legacy tree (reference only)
+#   worker/public/vendor/           — vendored uPlot (never mutate)
+#   worker/public/facilities.json   — vendored Open Electricity snapshot
+#   worker/public/basemap.json      — generated Natural Earth geometry
+#   worker/public/assets/styles.css — tailwind build artifact; CI requires it
+#                                     byte-identical to the build output
+exclude: ^(api|config|dist|src|tests)/|^worker/public/(vendor/|facilities\.json|basemap\.json|assets/styles\.css)
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+        exclude: tsconfig.*\.json$ # JSONC — comments are valid; tsc validates these
+      - id: check-added-large-files
+        args: [--maxkb=2048] # facilities.json snapshot refreshes at ~1.3 MB
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
