@@ -553,6 +553,14 @@ const fetchDispatch = (range) => fetchJson(`/api/v2/dispatch?${rangeQuery(range)
 const fetchWeather = (range, region) =>
   fetchJson(weatherEndpoint(range, region, Date.now()), { signal: AbortSignal.timeout(8000) });
 
+// Per-feed failure isolation (LAB-1700): a side-feed promise that rejects
+// logs under its grep-able label and degrades to null instead of taking the
+// whole load()'s Promise.all — and the fuel mix — down with it.
+const soft = (label, promise) => promise.catch((err) => {
+  console.error(label, err);
+  return null;
+});
+
 // Monotonic token so a slow, stale region response can never overwrite the
 // latest selection (or clear a newer request's busy state).
 let activeLoad = 0;
@@ -582,28 +590,20 @@ async function load(region, range) {
     // bucket axes equal (same rule as fetchDispatch below).
     const [payload, intensity, dispatch, rooftop, weather] = await Promise.all([
       fetchJson(url),
-      fetch(`/api/v2/intensity?${rangeQuery(range)}`)
-        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .catch((err) => {
-          console.error('carbon-intensity load failed:', err);
-          return null;
-        }),
+      soft('carbon-intensity load failed:', fetchJson(`/api/v2/intensity?${rangeQuery(range)}`)),
       wantedDispatch
-        ? fetchDispatch(range).catch((err) => { console.error('dispatch overlay refresh failed:', err); return null; })
+        ? soft('dispatch overlay refresh failed:', fetchDispatch(range))
         : Promise.resolve(null),
       // Rooftop (LAB-1701) rides every load like intensity: no region param
       // (all five regions in one small payload, sliced client-side), same
       // range query so the bucket axes join by timestamp, and isolated
       // failure — a missing estimate degrades the band to absent, never
       // takes the fuel mix down and never renders zeros.
-      fetchJson(`/api/v2/rooftop?${rangeQuery(range)}`).catch((err) => {
-        console.error('rooftop-pv load failed:', err);
-        return null;
-      }),
+      soft('rooftop-pv load failed:', fetchJson(`/api/v2/rooftop?${rangeQuery(range)}`)),
       // Weather (LAB-1699), region-specific unlike the others above — a
       // region switch while the overlay is on refetches under this loadId.
       wantedWeather
-        ? fetchWeather(range, region).catch((err) => { console.error('weather overlay refresh failed:', err); return null; })
+        ? soft('weather overlay refresh failed:', fetchWeather(range, region))
         : Promise.resolve(null),
     ]);
     if (loadId !== activeLoad) return;
