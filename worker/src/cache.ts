@@ -137,21 +137,32 @@ export function cacheInstance(): WorkersCache {
     backend: workersCacheAPI(),
     // LZ4 + xxHash3-64 ByteStorage envelope, via the wasm32 cachekit-core
     // build. Bodies here are columnar JSON (repeated key names, long runs of
-    // `null` gaps, comma-separated floats) — the shape LZ4 eats. Measured
-    // (LAB-1765, miniflare workerd, 10 rounds, /values bodies at 600 series):
+    // `null` gaps, comma-separated floats) — the shape LZ4 eats.
     //
-    //   288 buckets (the default 24 h query, 966 KiB JSON)
-    //     stored  966 -> 350 KiB (2.76x)   set 7.3 -> 17.3 ms   get 1.0 -> 8.5 ms
-    //   500 buckets (300000 rows, the MAX_LIMIT ceiling, 1653 KiB JSON)
-    //     stored 1653 -> 606 KiB (2.73x)   set 8.9 -> 25.4 ms   get 1.2 -> 13.7 ms
+    // Decompression is INLINE in every cache hit, so it is user-visible TTFB,
+    // not a background cost. Measured end to end through worker.fetch at the
+    // dashboard's default range (LAB-1765, miniflare workerd, hours=24, 10
+    // hits each, compression off -> on). The dashboard fetches exactly three
+    // things (public/app.js), and all three are ~20 KiB:
     //
-    // So this is NOT free: a hit costs ~8 ms more, ~14 ms at the ceiling, and
-    // that is CPU, not I/O. Kept because Cache API storage is free and the
-    // real currency is retention — entries are 0.3-1.6 MB and colo LRU evicts
-    // the big ones first, so 2.7x more resident entries is a direct hit-rate
-    // lever, and the added milliseconds stay an order below the D1 aggregation
-    // over up to 300000 rows that a miss costs. Revert (with a KEY_VERSION
-    // bump, see above) if wrangler tail shows hit-path CPU near the limit.
+    //   /values/aggregate?group_by=fuel    21 KiB   hit 0.6 -> 1.1 ms
+    //   /dispatch                          20 KiB   hit 0.5 -> 0.5 ms
+    //   /intensity                         17 KiB   hit 0.4 -> 0.5 ms
+    //   /values  (API drill-down — NOT     501 KiB  hit 1.6 -> 3.8 ms
+    //             fetched by the dashboard)
+    //
+    // So a page load pays ~+0.6 ms across all three fetches. The entries where
+    // compression earns anything (0.5-1.6 MB /values responses) are the same
+    // ones that pay the few ms, and the same ones whose miss costs a D1
+    // aggregation over up to 300000 rows — cost and benefit land together.
+    // Stored size falls 2.7x (966 -> 350 KiB at 24 h, 1653 -> 606 KiB at the
+    // 300000-row ceiling), which is the whole point: Cache API storage is free
+    // to us, but colo LRU evicts big objects first, so smaller entries survive.
+    //
+    // Not free, just cheap where users actually are. Revert (with a
+    // KEY_VERSION bump, see above) if wrangler tail shows hit-path CPU near
+    // the limit — these are miniflare numbers on a fast desktop core, so
+    // expect edge hardware to be slower.
     // The wasm module is a static import in cachekit's Workers runtime, so it
     // is in the bundle whether or not this is on — verified byte-identical at
     // 373.44 KiB / 113.30 KiB gz either way. Off was paying for it unused.
