@@ -135,7 +135,14 @@ function boxAspect() {
   // exactly the letterboxing this function exists to prevent. Only a zero
   // dimension (no layout yet) gets a fallback, and 4/3 is just something
   // finite to survive on until the resize listener supplies the truth.
-  const { clientWidth: w, clientHeight: h } = svg;
+  //
+  // Measured with getBoundingClientRect, NOT clientWidth/clientHeight, because
+  // those two round to whole pixels: at a 380 px viewport the box is 236.4 px
+  // tall and `clientHeight` calls it 236, so the viewBox gets fitted to an
+  // aspect the element does not have — a 0.17% letterbox, found by the pointer
+  // probe. It has to be the same measurement clientToUser() uses or the two
+  // disagree by construction, which is this bug's entire family.
+  const { width: w, height: h } = svg.getBoundingClientRect();
   return w > 0 && h > 0 ? w / h : 4 / 3;
 }
 

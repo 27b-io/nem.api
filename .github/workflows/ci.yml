@@ -52,7 +52,28 @@ jobs:
           git diff --exit-code -- public/assets/styles.css
       - name: Apply local D1 migrations
         run: npm run migrate:local
-      - name: Smoke-check local /health
+      # The map's pointer handling cannot be checked by the suite above: a
+      # synthetic click never exercises pointerdown -> capture -> click
+      # retargeting, which is how four /map regressions shipped green (LAB-1702).
+      # The probe drives a real mouse in a real browser, so it needs one.
+      - name: Cache the probe's browser
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          # Exact key only, no restore-keys: a partial hit would restore ~150 MB
+          # of the WRONG browser revision, download the right one anyway, then
+          # save a cache holding both. All cost, no benefit.
+          key: playwright-${{ runner.os }}-${{ hashFiles('worker/package-lock.json') }}
+      - name: Install the probe's browser
+        # Pinned by playwright-core's version in package-lock.json — it downloads
+        # the one browser revision it was built against, never "latest Chrome".
+        # A cache hit skips the download; the apt deps are not cacheable and run
+        # either way. No system browser is assumed to exist.
+        run: npx playwright-core install --with-deps chromium
+      # One `wrangler dev` serves both gates: /health proves the Worker and its
+      # seeded D1 are up, and that same server is what the probe drives. Booting
+      # it twice would buy nothing but a second minute of CI.
+      - name: Smoke-check local /health, then drive /map with a real pointer
         shell: bash
         run: |
           set -euo pipefail
@@ -66,18 +87,30 @@ jobs:
           }
           trap cleanup EXIT
 
+          # Readiness by polling the endpoint itself — never a fixed sleep, and
+          # never a retry of the assertions: a probe allowed to pass on the
+          # second attempt is a gate that reports "flaky" as "green".
+          response=""
           for attempt in {1..30}; do
             if response="$(curl --silent --show-error --fail http://127.0.0.1:8787/health 2>/dev/null)"; then
-              if [ "$response" = '{"status":"ok","generators":350}' ]; then
-                exit 0
-              fi
-              echo "Unexpected /health response: $response" >&2
-              cat "$log_file" >&2
-              exit 1
+              break
             fi
+            response=""
             sleep 1
           done
 
-          echo "Local Worker did not become ready" >&2
-          cat "$log_file" >&2
-          exit 1
+          if [ -z "$response" ]; then
+            echo "Local Worker did not become ready" >&2
+            cat "$log_file" >&2
+            exit 1
+          fi
+          if [ "$response" != '{"status":"ok","generators":350}' ]; then
+            echo "Unexpected /health response: $response" >&2
+            cat "$log_file" >&2
+            exit 1
+          fi
+
+          # The trap deletes the log on the way out, so a probe failure caused by
+          # the SERVER (a 500 from /api/v2/generators, migrations not applied)
+          # would otherwise present as a bare browser timeout with no evidence.
+          npm run probe:map || { cat "$log_file" >&2; exit 1; }

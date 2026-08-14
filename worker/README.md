@@ -129,7 +129,7 @@ aspect differs from the box letterboxes under `preserveAspectRatio` and silently
 offsets every pointer coordinate. The cap is also what makes an unmodified wheel
 zoom acceptable: there is always page above and below the map to scroll past it.
 
-**Interaction here needs a real browser with real pointer events.** Two bugs
+**Interaction here needs a real browser with real pointer events.** Four bugs
 shipped past a DOM-assertion check that reported 213 markers with correct classes
 and no console errors:
 
@@ -142,14 +142,54 @@ and no console errors:
 - the drag threshold was 0.2% of the viewBox width — under two screen pixels at
   the whole-NEM view — so the hand tremor in an ordinary click registered as a
   drag and the click was suppressed. It is now 4 CSS pixels.
+- double-clicking a *pin* zoomed the map out from under the panel it had just
+  opened, and the two clicks in the gesture each fired the 24-hour drill-down
+  fetch. Double-click now zooms the basemap only, and the capture-phase click
+  handler drops any click with `detail > 1`.
+- `boxAspect()` measured the box with `clientWidth`/`clientHeight`, which **round
+  to whole pixels**, while `clientToUser()` converts with the fractional
+  `getBoundingClientRect()`. A 236.4 px box read as 236 fitted the viewBox to an
+  aspect the element does not have — the same letterbox as above, at 0.17%, on
+  any viewport where the height is not a whole number. Both must be the same
+  measurement or they disagree by construction.
 
 A synthetic `click` dispatched on a node (lightpanda, `element.click()`) does
-**not** exercise `pointerdown` → capture → `click` retargeting, which is exactly
-why both survived. Verify map interaction with playwright-core driving the system
-Chrome (`executablePath: /usr/bin/google-chrome`) and `page.mouse.*`, and
-screenshot it: an SVG geometry bug paints a blank or distorted map while every
-DOM assertion passes. This is not wired into CI — it needs a browser dependency
-the Worker does not otherwise carry.
+**not** exercise `pointerdown` → capture → `click` retargeting, does not hit-test
+through letterboxing, and never produces a `detail > 1` — which is exactly why
+all of them survived a check that reported 213 markers with the right classes and
+no console errors.
+
+**So a real browser moving a real mouse is a CI gate here**, not an optional
+local ritual. `test/pointer-probe.mjs` drives `/map` with `page.mouse.*` through
+playwright-core and fails the build on a pointer regression; each assertion
+carries the bug it exists for, so read the file rather than a list here that
+would go stale the first time one moves.
+
+```sh
+npm run migrate:local                          # seed D1 — no data, no markers, no probe
+npx playwright-core install --with-deps chromium
+npx wrangler dev --local                       # in one shell; the probe needs a server
+npm run probe:map                              # in another — PROBE_URL to point elsewhere
+PROBE_HEADED=1 npm run probe:map               # watch it drive
+```
+
+The browser is `playwright-core`'s own pinned chromium, not a system Chrome, so
+CI and your laptop run the same revision. In CI it is cached and the probe shares
+the `wrangler dev` the `/health` smoke check already boots, which is why the gate
+adds about half a minute rather than two.
+
+Two rules for anything added to it. **No sleeps and no retries** — wait on the
+thing the gesture causes, and run the assertions exactly once, because a probe
+allowed to pass on its second attempt reports "flaky" as "green". And **make the
+gesture the code actually reacts to**: `mouse.click()` never moves while the
+button is down (its only `pointermove` lands before `pointerdown`), so it passes
+at any drag threshold including a negative one, and a drag released
+where the marker no longer is proves nothing about click suppression. Both of
+those assertions were green against a deliberately broken map before they were
+rewritten to move the mouse the way a hand does; `worker/README.md` is not the
+place that will remind you, so the probe says it in its own header. Screenshots
+stay a manual diagnostic — an SVG geometry bug can paint a distorted map while
+every assertion passes, and eyes are still the cheapest way to see that.
 
 Shared page chrome (`$`, `fetchJson`, `showError`, `REGIONS`, `TZ`, the theme
 toggle) lives in `public/chrome.js` and is imported by both pages; the theme
