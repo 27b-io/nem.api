@@ -8,7 +8,6 @@ import {
   CLOSED_WINDOW_TTL_SECONDS,
   GENERATORS_TTL_SECONDS,
   INGEST_GRACE_SECONDS,
-  L1_LIMITS,
   ROOFTOP_PUBLICATION_GRACE_SECONDS,
   SERIALIZER_LIMITS,
 } from '../src/cache';
@@ -342,7 +341,11 @@ describe('handleApiCached — integration', () => {
     const body = productionBody(500); // 300000 rows, the MAX_LIMIT ceiling
     expect(body.length).toBeGreaterThan(1024 * 1024);
     await cacheInstance().set(key, { body, expires: 1 }, { ttl: 60 });
-    const hit = await cacheInstance().get<{ body: string; expires: number }>(key);
+    // Read back through an L1-less twin: an L1 hit would hand back the same
+    // object reference and prove nothing about the stored bytes.
+    const hit = await createCache
+      .minimal({ backend: workersCacheAPI(), compression: true, l1: { enabled: false }, serializer: SERIALIZER_LIMITS })
+      .get<{ body: string; expires: number }>(key);
     expect(hit?.body === body).toBe(true);
     expect(hit?.expires).toBe(1);
   });
@@ -516,35 +519,41 @@ describe('L1 — in-isolate tier', () => {
     expect(await hit.json()).toEqual(await miss.json());
   });
 
-  it('a copy a tier still holds past its own `expires` is a miss, not a hit', async () => {
-    // The tiers only approximate the boundary: Cache API max-age counts from
-    // the write (after the D1 query), and L1's cap is whole-second and trusts
-    // the edge's Age. Here L1 holds the entry for 60 s but its boundary is 10 s
-    // out, so at t=11 s only handleApiCached's own check stands between the
-    // request and a past-boundary body.
-    const url = new URL(`https://${host}/api/v2/generators?duid=BAPS`);
-    const key = buildCacheEntry(url, Math.floor(Date.now() / 1000))!.key;
-    const expires = Math.floor(Date.now() / 1000) + 10;
-    await cacheInstance().set(key, { body: '{"stale":true}', expires }, { ttl: 60 });
+  // The tiers only approximate the boundary: both count their TTL from the
+  // write (after the D1 query), and L1's repopulation cap is whole-second and
+  // trusts the edge's Age. Here a tier holds the entry for 60 s but its
+  // boundary is 10 s out, so at t=11 s only handleApiCached's own check stands
+  // between the request and a past-boundary body. Once per tier: L1 (written
+  // through the configured instance) and the Cache API (written through the
+  // L1-less twin; miniflare's Cache API runs on real time, so the fake clock
+  // leaves the copy in place).
+  for (const tier of ['L1', 'Cache API'] as const) {
+    it(`a copy the ${tier} still holds past its own \`expires\` is a miss, not a hit`, async () => {
+      const url = new URL(`https://${host}/api/v2/generators?duid=BAPS`);
+      const key = buildCacheEntry(url, Math.floor(Date.now() / 1000))!.key;
+      const expires = Math.floor(Date.now() / 1000) + 10;
+      const writer = tier === 'L1' ? cacheInstance() : l2Only();
+      await writer.set(key, { body: '{"stale":true}', expires }, { ttl: 60 });
 
-    const before = await worker.fetch(new Request(url.toString()), env);
-    expect(before.headers.get('x-cache')).toBe('HIT');
+      const before = await worker.fetch(new Request(url.toString()), env);
+      expect(before.headers.get('x-cache')).toBe('HIT');
 
-    vi.setSystemTime(Date.now() + 11_000);
-    const after = await worker.fetch(new Request(url.toString()), env);
-    expect(after.headers.get('x-cache')).toBe('MISS');
-    expect(await after.text()).not.toContain('stale');
-  });
+      vi.setSystemTime(Date.now() + 11_000);
+      const after = await worker.fetch(new Request(url.toString()), env);
+      expect(after.headers.get('x-cache')).toBe('MISS');
+      expect(await after.text()).not.toContain('stale');
+    });
+  }
 
-  it('holds dashboard-sized bodies and refuses multi-MB ones (L1_LIMITS)', async () => {
+  it('holds dashboard-sized bodies and refuses /values drill-downs (L1_LIMITS)', async () => {
     // cachekit refuses an entry charged above maxMemory / 8, and charges about
     // 1.75x the serialized size. The bound is the decision, so pin both sides:
-    // a ~20 KiB dashboard body is admitted, a 1.6 MB ceiling body is not.
-    // Raising L1_LIMITS.maxMemory far enough turns this red, as it should.
+    // a ~20 KiB dashboard body is admitted, a /values drill-down at the small
+    // end of its 0.5-1.6 MB range is not. Raising L1_LIMITS.maxMemory far
+    // enough turns this red, as it should.
     const small = `test:l1-small:${host}`;
     const big = `test:l1-big:${host}`;
-    const bigBody = productionBody(500);
-    expect(bigBody.length).toBeLessThan(L1_LIMITS.maxMemory / 8); // refused on the charge, not the raw size
+    const bigBody = productionBody(150); // ~500 KiB, the small end of /values drill-downs
     await cacheInstance().set(small, { body: 'x'.repeat(20 * 1024), expires: 1 }, { ttl: 60 });
     await cacheInstance().set(big, { body: bigBody, expires: 1 }, { ttl: 60 });
 

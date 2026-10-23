@@ -130,13 +130,13 @@ export const SERIALIZER_LIMITS = { maxEncodedSize: 64 * 1024 * 1024, maxDecodedS
 
 // Isolate memory is 128 MB and /api/v2 bodies reach multi-MB, so L1 gets a
 // deliberate budget, not cachekit's 50 MB default. cachekit refuses any entry
-// charged above an eighth of maxMemory (~1.75x its serialized size), so 16 MiB
-// admits bodies up to ~1.1 MiB: the dashboard's three ~20 KiB fetches (the
-// hot set L1 exists for) fit hundreds of times over, while the 0.5-1.6 MB
-// /values drill-downs stay in the colo Cache API only. maxEntries is the hard
-// cap cachekit documents; 256 is far above the dashboard's key count (3 routes
-// x a handful of ranges/regions x hosts).
-export const L1_LIMITS = { maxMemory: 16 * 1024 * 1024, maxEntries: 256 };
+// charged above an eighth of maxMemory, and charges ~1.75x the serialized
+// size, so 4 MiB admits bodies up to ~290 KiB. That holds ~100 of the
+// dashboard's ~20 KiB fetches (the hot set L1 exists for), while every
+// /values drill-down (0.5-1.6 MB) stays in the colo Cache API only and can
+// never evict that set. maxEntries is the hard cap cachekit documents, for
+// small bodies the memory budget would let pile up.
+export const L1_LIMITS = { maxMemory: 4 * 1024 * 1024, maxEntries: 256 };
 
 // One cache per isolate, per the SDK's own guidance — per-request creation
 // leaks wasm allocations on hot isolates. Lazy so module init stays
@@ -189,9 +189,10 @@ export function cacheInstance(): WorkersCache {
     // repopulates L1 for the entry's REMAINING lifetime (CacheAPIBackend
     // .getWithTtl: max-age minus Age), not the preset's defaultTtl — under
     // 0.1.5 a hot isolate could serve a boundary-TTL entry past the boundary.
-    // That cap rests on the edge reporting Age and is whole-second, so it is
-    // not the only guard: handleApiCached refuses any hit past its own
-    // `expires`, whichever tier served it. Sized by L1_LIMITS above.
+    // L1 still overshoots slightly: that cap is whole-second and trusts the
+    // edge's Age, and a miss-fill set() starts L1's clock after the D1 query.
+    // So it is not the only guard: handleApiCached refuses any hit past its
+    // own `expires`, whichever tier served it. Sized by L1_LIMITS above.
     l1: { enabled: true, ...L1_LIMITS },
     // /api/v2 bodies are multi-MB at the default 300000-row limit; cachekit's
     // 1 MiB encode default would throw ValueTooLargeError on exactly the
@@ -399,9 +400,9 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
       // both are silent everywhere else.
       console.error(`cache entry ignored, unexpected shape (${entry.key})`);
     } else if (stored !== null && stored.expires > nowSeconds) {
-      // `expires` is the policy boundary; the tiers only approximate it. The
-      // Cache API stores max-age from the write, which lands after the D1
-      // query, and L1's cap is whole-second and trusts the edge's Age. A copy
+      // `expires` is the policy boundary; the tiers only approximate it. Both
+      // count their TTL from the write, which lands after the D1 query, and
+      // L1's repopulation cap is whole-second and trusts the edge's Age. A copy
       // either tier still holds past the boundary is a miss and gets refilled.
       hit = stored;
     }
