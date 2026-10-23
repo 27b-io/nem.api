@@ -392,14 +392,18 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
   if (entry === null || entry.ttl <= 0) return handleApi(request, env);
 
   let hit: CachedResponse | null = null;
+  let readAt = nowSeconds;
   try {
     const stored = await cacheInstance().get(entry.key);
+    // Re-read the clock after the read: it is I/O and can cross a boundary,
+    // and a hit is fresh only if it is fresh when it is served.
+    readAt = Math.floor(Date.now() / 1000);
     if (stored !== null && !isCachedResponse(stored)) {
       // A decodable entry that is not ours: loud, because the only ways to get
       // here are a missed KEY_VERSION bump or a stored-format mismatch, and
       // both are silent everywhere else.
       console.error(`cache entry ignored, unexpected shape (${entry.key})`);
-    } else if (stored !== null && stored.expires > nowSeconds) {
+    } else if (stored !== null && stored.expires > readAt) {
       // `expires` is the policy boundary; the tiers only approximate it. Both
       // count their TTL from the write, which lands after the D1 query, and
       // L1's repopulation cap is whole-second and trusts the edge's Age. A copy
@@ -412,7 +416,7 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
   if (hit !== null) {
     return new Response(hit.body, {
       status: 200,
-      headers: responseHeaders(Math.max(0, hit.expires - nowSeconds), hit.expires, 'HIT'),
+      headers: responseHeaders(hit.expires - readAt, hit.expires, 'HIT'),
     });
   }
 
@@ -427,5 +431,10 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
     // A failed set must never fail the request — the data is already in hand.
     console.error(`cache set failed (${entry.key}):`, err);
   }
-  return new Response(body, { status: 200, headers: responseHeaders(entry.ttl, expires, 'MISS') });
+  // `expires` is fixed at request start (the policy decides on the window as
+  // it was then), but the D1 query and the write above take time: the
+  // outgoing max-age is what is left of it NOW, so a client cannot hold the
+  // body past the boundary by the time this request took.
+  const maxAge = Math.max(0, expires - Math.floor(Date.now() / 1000));
+  return new Response(body, { status: 200, headers: responseHeaders(maxAge, expires, 'MISS') });
 }

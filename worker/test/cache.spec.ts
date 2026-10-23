@@ -545,6 +545,51 @@ describe('L1 — in-isolate tier', () => {
     });
   }
 
+  it('a hit that expires while the cache read is in flight is a miss', async () => {
+    // Freshness is judged when the read returns, not when the request
+    // started: the read is I/O and can cross the boundary. Simulated by a get
+    // that resolves 11 s later than it started, on an entry 10 s from expiry.
+    const url = new URL(`https://${host}/api/v2/generators?duid=BAPS`);
+    const key = buildCacheEntry(url, Math.floor(Date.now() / 1000))!.key;
+    await cacheInstance().set(key, { body: '{"stale":true}', expires: Math.floor(Date.now() / 1000) + 10 }, { ttl: 60 });
+
+    const instance = cacheInstance();
+    const realGet = instance.get.bind(instance);
+    const spy = vi.spyOn(instance, 'get').mockImplementationOnce(async (k: string) => {
+      const value = await realGet(k);
+      vi.setSystemTime(Date.now() + 11_000);
+      return value;
+    });
+    try {
+      const res = await worker.fetch(new Request(url.toString()), env);
+      expect(res.headers.get('x-cache')).toBe('MISS');
+      expect(await res.text()).not.toContain('stale');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a MISS's max-age is what is left of the policy TTL when the response is sent", async () => {
+    // expires is fixed at request start; a slow D1 query or cache write must
+    // not let the client hold the body that much past it.
+    const url = new URL(`https://${host}/api/v2/generators?duid=BAPS`);
+    const instance = cacheInstance();
+    const realSet = instance.set.bind(instance);
+    const spy = vi.spyOn(instance, 'set').mockImplementationOnce(async (...args: Parameters<typeof realSet>) => {
+      await realSet(...args);
+      vi.setSystemTime(Date.now() + 100_000);
+    });
+    try {
+      const res = await worker.fetch(new Request(url.toString()), env);
+      expect(res.headers.get('x-cache')).toBe('MISS');
+      const expires = Number(res.headers.get('x-cache-expires'));
+      expect(res.headers.get('cache-control')).toBe(`public, max-age=${expires - Math.floor(Date.now() / 1000)}`);
+      expect(expires - Math.floor(Date.now() / 1000)).toBe(GENERATORS_TTL_SECONDS - 100);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('holds dashboard-sized bodies and refuses /values drill-downs (L1_LIMITS)', async () => {
     // cachekit refuses an entry charged above maxMemory / 8, and charges about
     // 1.75x the serialized size. The bound is the decision, so pin both sides:
