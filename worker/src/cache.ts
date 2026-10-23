@@ -99,9 +99,11 @@ export const GENERATORS_TTL_SECONDS = 3600;
 // A REVERT needs a bump too, and for a worse reason: the envelope is itself
 // valid positional MessagePack, so a compression-off reader DECODES a k5 entry
 // successfully and hands the envelope tuple back as the value — not a miss
-// (cachekit-ts finding, LAB-1388; the tolerant read path that fixes it is
-// merged upstream but unreleased as of 0.1.5). That is what isCachedResponse()
-// catches: without it, the tuple's absent `body` was served as an empty 200.
+// (cachekit-ts finding, LAB-1388; 0.2.0 shipped a tolerant read path for it,
+// not re-verified here — the bump stays the safe move). That is
+// what isCachedResponse() catches: without it, the tuple's absent `body` was
+// served as an empty 200. Upgrading cachekit 0.1.5 -> 0.2.1 did NOT need a
+// bump: a 0.1.5-written k5 entry decodes under 0.2.1 (checked on LAB-1766).
 const KEY_VERSION = 'k5';
 
 /**
@@ -125,6 +127,16 @@ interface CacheEntry {
 // Exported so tests bind to the SAME caps as production — a test-local copy
 // silently stops testing the real config the moment either number moves.
 export const SERIALIZER_LIMITS = { maxEncodedSize: 64 * 1024 * 1024, maxDecodedSize: 64 * 1024 * 1024 };
+
+// Isolate memory is 128 MB and /api/v2 bodies reach multi-MB, so L1 gets a
+// deliberate budget, not cachekit's 50 MB default. cachekit refuses any entry
+// charged above an eighth of maxMemory, and charges ~1.75x the serialized
+// size, so 4 MiB admits bodies up to ~290 KiB. That holds ~100 of the
+// dashboard's ~20 KiB fetches (the hot set L1 exists for), while every
+// /values drill-down (0.5-1.6 MB) stays in the colo Cache API only and can
+// never evict that set. maxEntries is the hard cap cachekit documents, for
+// small bodies the memory budget would let pile up.
+export const L1_LIMITS = { maxMemory: 4 * 1024 * 1024, maxEntries: 256 };
 
 // One cache per isolate, per the SDK's own guidance — per-request creation
 // leaks wasm allocations on hot isolates. Lazy so module init stays
@@ -171,13 +183,17 @@ export function cacheInstance(): WorkersCache {
     // advertise FALSE, so relying on the default would silently un-compress
     // this cache on a future upgrade.
     compression: true,
-    // cachekit's L1 would repopulate on an L2 hit with ITS default TTL
-    // (cache-core get(): ttlSeconds ?? defaultTtl), not the entry's remaining
-    // lifetime — an isolate could serve a boundary-TTL entry past the
-    // dispatch boundary. The Cache API backend is already colo-local, so L1
-    // buys nothing here but that staleness (plus multi-MB bodies in isolate
-    // memory). Off.
-    l1: { enabled: false },
+    // In-isolate L1 in front of the colo Cache API, so hot isolates skip the
+    // match() + decompress on repeat dashboard hits. Safe for this cache's
+    // TTL-as-correctness policy since cachekit 0.2.0 (LAB-1388): an L2 hit
+    // repopulates L1 for the entry's REMAINING lifetime (CacheAPIBackend
+    // .getWithTtl: max-age minus Age), not the preset's defaultTtl — under
+    // 0.1.5 a hot isolate could serve a boundary-TTL entry past the boundary.
+    // L1 still overshoots slightly: that cap is whole-second and trusts the
+    // edge's Age, and a miss-fill set() starts L1's clock after the D1 query.
+    // So it is not the only guard: handleApiCached refuses any hit past its
+    // own `expires`, whichever tier served it. Sized by L1_LIMITS above.
+    l1: { enabled: true, ...L1_LIMITS },
     // /api/v2 bodies are multi-MB at the default 300000-row limit; cachekit's
     // 1 MiB encode default would throw ValueTooLargeError on exactly the
     // heaviest queries — caught and logged, but silently never cached.
@@ -376,14 +392,22 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
   if (entry === null || entry.ttl <= 0) return handleApi(request, env);
 
   let hit: CachedResponse | null = null;
+  let readAt = nowSeconds;
   try {
     const stored = await cacheInstance().get(entry.key);
+    // Re-read the clock after the read: it is I/O and can cross a boundary,
+    // and a hit is fresh only if it is fresh when it is served.
+    readAt = Math.floor(Date.now() / 1000);
     if (stored !== null && !isCachedResponse(stored)) {
       // A decodable entry that is not ours: loud, because the only ways to get
       // here are a missed KEY_VERSION bump or a stored-format mismatch, and
       // both are silent everywhere else.
       console.error(`cache entry ignored, unexpected shape (${entry.key})`);
-    } else {
+    } else if (stored !== null && stored.expires > readAt) {
+      // `expires` is the policy boundary; the tiers only approximate it. Both
+      // count their TTL from the write, which lands after the D1 query, and
+      // L1's repopulation cap is whole-second and trusts the edge's Age. A copy
+      // either tier still holds past the boundary is a miss and gets refilled.
       hit = stored;
     }
   } catch (err) {
@@ -392,7 +416,7 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
   if (hit !== null) {
     return new Response(hit.body, {
       status: 200,
-      headers: responseHeaders(Math.max(0, hit.expires - nowSeconds), hit.expires, 'HIT'),
+      headers: responseHeaders(hit.expires - readAt, hit.expires, 'HIT'),
     });
   }
 
@@ -407,5 +431,10 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
     // A failed set must never fail the request — the data is already in hand.
     console.error(`cache set failed (${entry.key}):`, err);
   }
-  return new Response(body, { status: 200, headers: responseHeaders(entry.ttl, expires, 'MISS') });
+  // `expires` is fixed at request start (the policy decides on the window as
+  // it was then), but the D1 query and the write above take time: the
+  // outgoing max-age is what is left of it NOW, so a client cannot hold the
+  // body past the boundary by the time this request took.
+  const maxAge = Math.max(0, expires - Math.floor(Date.now() / 1000));
+  return new Response(body, { status: 200, headers: responseHeaders(maxAge, expires, 'MISS') });
 }
