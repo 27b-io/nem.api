@@ -1,6 +1,6 @@
 import { ByteStorage, createCache, MessagePackSerializer, workersCacheAPI } from '@cachekit-io/cachekit/workers';
 import { env } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   boundaryTtl,
   buildCacheEntry,
@@ -8,6 +8,7 @@ import {
   CLOSED_WINDOW_TTL_SECONDS,
   GENERATORS_TTL_SECONDS,
   INGEST_GRACE_SECONDS,
+  L1_LIMITS,
   ROOFTOP_PUBLICATION_GRACE_SECONDS,
   SERIALIZER_LIMITS,
 } from '../src/cache';
@@ -434,7 +435,7 @@ describe('compression — ByteStorage envelope', () => {
     // any decodable non-CachedResponse must become a MISS, whatever produced
     // it (a missed KEY_VERSION bump, a revert, a future shape change). Pinning
     // the vendor misread instead would have gone red on the upstream fix
-    // (LAB-1388, merged but unreleased) without the guard ever regressing.
+    // (LAB-1388, shipped in 0.2.0) without the guard ever regressing.
     const url = new URL(`https://${host}/api/v2/generators?duid=BAPS`);
     const key = buildCacheEntry(url, Math.floor(Date.now() / 1000))!.key;
     await cacheInstance().set(key, ['not', 'a', 'CachedResponse'], { ttl: 60 });
@@ -446,5 +447,112 @@ describe('compression — ByteStorage envelope', () => {
     const generators: Array<{ duid: string }> = JSON.parse(await res.text());
     expect(generators.length).toBeGreaterThan(0);
     expect(generators[0].duid).toBe('BAPS');
+  });
+});
+
+/**
+ * LAB-1766: L1 is on. Each test isolates L1 the same way: write or read
+ * through the configured instance, then delete the Cache API copy through a
+ * second, L1-less instance — from then on only the configured instance's L1
+ * can answer. Date is faked so lifetimes are asserted to the second without
+ * sleeping; L1 and cachekit's receipt clock both read Date.now().
+ */
+describe('L1 — in-isolate tier', () => {
+  let host: string;
+
+  /** Same backend and wire format as production, no L1: a Cache-API-only view. */
+  function l2Only() {
+    return createCache.minimal({
+      backend: workersCacheAPI(),
+      compression: true,
+      l1: { enabled: false },
+      serializer: SERIALIZER_LIMITS,
+    });
+  }
+
+  beforeEach(() => {
+    host = `t-${crypto.randomUUID()}.test`;
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('an L2 hit repopulates L1 only until the ORIGINAL expiry, not defaultTtl (LAB-1388)', async () => {
+    // The exact failure mode: a plain get() (no ttl) that misses L1 and hits
+    // L2. cachekit 0.1.5 refilled L1 for the preset's defaultTtl (300 s), so
+    // this 30 s entry would still be served at t=31 s — the last assertion is
+    // red under 0.1.5 semantics.
+    const key = `test:l1-repop:${host}`;
+    const writer = l2Only();
+    await writer.set(key, { body: 'b', expires: 0 }, { ttl: 30 });
+    expect(await cacheInstance().get(key)).not.toBeNull(); // L2 hit, repopulates L1
+
+    await writer.delete(key);
+    expect(await cacheInstance().get(key)).not.toBeNull(); // L1 alone answers
+
+    vi.setSystemTime(Date.now() + 29_000);
+    expect(await cacheInstance().get(key)).not.toBeNull(); // the cap is not too short either
+
+    vi.setSystemTime(Date.now() + 2_000);
+    expect(await cacheInstance().get(key)).toBeNull(); // gone at the original boundary
+  });
+
+  it('an L1-served hit reports the REMAINING lifetime in cache-control and x-cache-expires', async () => {
+    const url = new URL(`https://${host}/api/v2/generators?duid=BAPS`);
+    const miss = await worker.fetch(new Request(url.toString()), env);
+    expect(miss.headers.get('x-cache')).toBe('MISS');
+    expect(miss.headers.get('cache-control')).toBe(`public, max-age=${GENERATORS_TTL_SECONDS}`);
+    const expires = Number(miss.headers.get('x-cache-expires'));
+
+    await l2Only().delete(buildCacheEntry(url, Math.floor(Date.now() / 1000))!.key);
+    vi.setSystemTime(Date.now() + 100_000);
+
+    const hit = await worker.fetch(new Request(url.toString()), env);
+    expect(hit.headers.get('x-cache')).toBe('HIT');
+    expect(hit.headers.get('x-cache-expires')).toBe(String(expires));
+    expect(hit.headers.get('cache-control')).toBe(`public, max-age=${expires - Math.floor(Date.now() / 1000)}`);
+    expect(await hit.json()).toEqual(await miss.json());
+  });
+
+  it('a copy a tier still holds past its own `expires` is a miss, not a hit', async () => {
+    // The tiers only approximate the boundary: Cache API max-age counts from
+    // the write (after the D1 query), and L1's cap is whole-second and trusts
+    // the edge's Age. Here L1 holds the entry for 60 s but its boundary is 10 s
+    // out, so at t=11 s only handleApiCached's own check stands between the
+    // request and a past-boundary body.
+    const url = new URL(`https://${host}/api/v2/generators?duid=BAPS`);
+    const key = buildCacheEntry(url, Math.floor(Date.now() / 1000))!.key;
+    const expires = Math.floor(Date.now() / 1000) + 10;
+    await cacheInstance().set(key, { body: '{"stale":true}', expires }, { ttl: 60 });
+
+    const before = await worker.fetch(new Request(url.toString()), env);
+    expect(before.headers.get('x-cache')).toBe('HIT');
+
+    vi.setSystemTime(Date.now() + 11_000);
+    const after = await worker.fetch(new Request(url.toString()), env);
+    expect(after.headers.get('x-cache')).toBe('MISS');
+    expect(await after.text()).not.toContain('stale');
+  });
+
+  it('holds dashboard-sized bodies and refuses multi-MB ones (L1_LIMITS)', async () => {
+    // cachekit refuses an entry charged above maxMemory / 8, and charges about
+    // 1.75x the serialized size. The bound is the decision, so pin both sides:
+    // a ~20 KiB dashboard body is admitted, a 1.6 MB ceiling body is not.
+    // Raising L1_LIMITS.maxMemory far enough turns this red, as it should.
+    const small = `test:l1-small:${host}`;
+    const big = `test:l1-big:${host}`;
+    const bigBody = productionBody(500);
+    expect(bigBody.length).toBeLessThan(L1_LIMITS.maxMemory / 8); // refused on the charge, not the raw size
+    await cacheInstance().set(small, { body: 'x'.repeat(20 * 1024), expires: 1 }, { ttl: 60 });
+    await cacheInstance().set(big, { body: bigBody, expires: 1 }, { ttl: 60 });
+
+    const writer = l2Only();
+    await writer.delete(small);
+    await writer.delete(big);
+
+    expect(await cacheInstance().get(small)).not.toBeNull();
+    expect(await cacheInstance().get(big)).toBeNull();
   });
 });

@@ -99,9 +99,11 @@ export const GENERATORS_TTL_SECONDS = 3600;
 // A REVERT needs a bump too, and for a worse reason: the envelope is itself
 // valid positional MessagePack, so a compression-off reader DECODES a k5 entry
 // successfully and hands the envelope tuple back as the value — not a miss
-// (cachekit-ts finding, LAB-1388; the tolerant read path that fixes it is
-// merged upstream but unreleased as of 0.1.5). That is what isCachedResponse()
-// catches: without it, the tuple's absent `body` was served as an empty 200.
+// (cachekit-ts finding, LAB-1388; 0.2.0 shipped a tolerant read path for it,
+// not re-verified here — the bump stays the safe move). That is
+// what isCachedResponse() catches: without it, the tuple's absent `body` was
+// served as an empty 200. Upgrading cachekit 0.1.5 -> 0.2.1 did NOT need a
+// bump: a 0.1.5-written k5 entry decodes under 0.2.1 (checked on LAB-1766).
 const KEY_VERSION = 'k5';
 
 /**
@@ -125,6 +127,16 @@ interface CacheEntry {
 // Exported so tests bind to the SAME caps as production — a test-local copy
 // silently stops testing the real config the moment either number moves.
 export const SERIALIZER_LIMITS = { maxEncodedSize: 64 * 1024 * 1024, maxDecodedSize: 64 * 1024 * 1024 };
+
+// Isolate memory is 128 MB and /api/v2 bodies reach multi-MB, so L1 gets a
+// deliberate budget, not cachekit's 50 MB default. cachekit refuses any entry
+// charged above an eighth of maxMemory (~1.75x its serialized size), so 16 MiB
+// admits bodies up to ~1.1 MiB: the dashboard's three ~20 KiB fetches (the
+// hot set L1 exists for) fit hundreds of times over, while the 0.5-1.6 MB
+// /values drill-downs stay in the colo Cache API only. maxEntries is the hard
+// cap cachekit documents; 256 is far above the dashboard's key count (3 routes
+// x a handful of ranges/regions x hosts).
+export const L1_LIMITS = { maxMemory: 16 * 1024 * 1024, maxEntries: 256 };
 
 // One cache per isolate, per the SDK's own guidance — per-request creation
 // leaks wasm allocations on hot isolates. Lazy so module init stays
@@ -171,13 +183,16 @@ export function cacheInstance(): WorkersCache {
     // advertise FALSE, so relying on the default would silently un-compress
     // this cache on a future upgrade.
     compression: true,
-    // cachekit's L1 would repopulate on an L2 hit with ITS default TTL
-    // (cache-core get(): ttlSeconds ?? defaultTtl), not the entry's remaining
-    // lifetime — an isolate could serve a boundary-TTL entry past the
-    // dispatch boundary. The Cache API backend is already colo-local, so L1
-    // buys nothing here but that staleness (plus multi-MB bodies in isolate
-    // memory). Off.
-    l1: { enabled: false },
+    // In-isolate L1 in front of the colo Cache API, so hot isolates skip the
+    // match() + decompress on repeat dashboard hits. Safe for this cache's
+    // TTL-as-correctness policy since cachekit 0.2.0 (LAB-1388): an L2 hit
+    // repopulates L1 for the entry's REMAINING lifetime (CacheAPIBackend
+    // .getWithTtl: max-age minus Age), not the preset's defaultTtl — under
+    // 0.1.5 a hot isolate could serve a boundary-TTL entry past the boundary.
+    // That cap rests on the edge reporting Age and is whole-second, so it is
+    // not the only guard: handleApiCached refuses any hit past its own
+    // `expires`, whichever tier served it. Sized by L1_LIMITS above.
+    l1: { enabled: true, ...L1_LIMITS },
     // /api/v2 bodies are multi-MB at the default 300000-row limit; cachekit's
     // 1 MiB encode default would throw ValueTooLargeError on exactly the
     // heaviest queries — caught and logged, but silently never cached.
@@ -383,7 +398,11 @@ export async function handleApiCached(request: Request, env: Env): Promise<Respo
       // here are a missed KEY_VERSION bump or a stored-format mismatch, and
       // both are silent everywhere else.
       console.error(`cache entry ignored, unexpected shape (${entry.key})`);
-    } else {
+    } else if (stored !== null && stored.expires > nowSeconds) {
+      // `expires` is the policy boundary; the tiers only approximate it. The
+      // Cache API stores max-age from the write, which lands after the D1
+      // query, and L1's cap is whole-second and trusts the edge's Age. A copy
+      // either tier still holds past the boundary is a miss and gets refilled.
       hit = stored;
     }
   } catch (err) {
